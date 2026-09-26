@@ -90,8 +90,10 @@ class CloudLlmNodeExecutor @Inject constructor(
         // everything else is parsed through CloudProvider.fromId so legacy aliases
         // (e.g. "gemini") still resolve correctly.
         val configuredProvider = node.cloudProvider
+        // The sentinel is matched ignoring case, as the node sheet matches it: "AUTO"
+        // showed as Auto there and ran here as an unknown provider.
         val selectedProvider: CloudProvider? = if (
-            configuredProvider == null || configuredProvider == CloudProvider.AUTO_KEY
+            configuredProvider == null || configuredProvider.equals(CloudProvider.AUTO_KEY, ignoreCase = true)
         ) {
             autoDetectProvider()
         } else {
@@ -168,6 +170,9 @@ class CloudLlmNodeExecutor @Inject constructor(
 
         try {
             responseStream.collect { frame ->
+                // Told again on every frame: an answer can stream for minutes, and the
+                // indicator must not read "no network calls in last 2 m" while it does.
+                networkActivityTracker.recordOutbound()
                 if (frame is StreamFrame.End) {
                     finishReason = frame.finishReason
                     val meta = frame.metaInfo
@@ -202,16 +207,16 @@ class CloudLlmNodeExecutor @Inject constructor(
             // message. Scrub before it reaches the console, the trace or logcat — passing
             // the message rather than the throwable to Timber keeps the key out of the
             // logged stack trace too.
-            // The deepest cause is what actually failed; the wrapper above it often has
-            // no message of its own, which is how a user ends up reading the word "null".
-            val rootCause = generateSequence(e as Throwable) { it.cause }.last()
-            val safeMessage = CloudErrorSanitizer.sanitize(e.message, rootCause::class.simpleName)
+            val safeMessage = CloudErrorSanitizer.sanitize(e)
             // The exception type is kept because it is the fastest triage signal and
             // carries no credential; only the throwable itself is withheld, since
             // logging it would print the unscrubbed message inside the stack trace.
             Timber.tag("PipelineDebug").e(
-                "[NODE_ERR] type=${node.type.name} id=${node.id} " +
-                    "CloudLlmNodeExecutor generation failed with ${e::class.simpleName}: $safeMessage",
+                "[NODE_ERR] type=%s id=%s CloudLlmNodeExecutor generation failed with %s: %s",
+                node.type.name,
+                node.id,
+                e::class.simpleName,
+                safeMessage,
             )
             send(NodeOutput.State(AgentOrchestratorState.Error(safeMessage)))
             send(NodeOutput.Result(NodeExecutionResult(error = safeMessage)))
@@ -295,7 +300,7 @@ class CloudLlmNodeExecutor @Inject constructor(
      * @param reason User-facing explanation of why no cloud call was attempted.
      */
     private suspend fun ProducerScope<NodeOutput>.emitFailure(reason: String) {
-        Timber.tag("PipelineDebug").e("[NODE_ERR] type=CLOUD $reason")
+        Timber.tag("PipelineDebug").e("[NODE_ERR] type=CLOUD %s", reason)
         send(NodeOutput.State(AgentOrchestratorState.Error(reason)))
         send(NodeOutput.Result(NodeExecutionResult(error = reason)))
     }

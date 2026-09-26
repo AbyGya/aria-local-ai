@@ -170,6 +170,7 @@ class ExternalAutomationBackgroundRunIntegrationTest {
         coEvery { chatRepository.sessionExists(SESSION_ID) } returns true
 
         settingsRepository = mockk()
+        every { settingsRepository.workspaceReadTokenBudget } returns flowOf(2_000)
         every { settingsRepository.verboseMemoryLoggingEnabled } returns flowOf(false)
         every { settingsRepository.chatHistoryCompressionEnabled } returns flowOf(false)
         every { settingsRepository.chatHistoryCompressionThresholdTokens } returns flowOf(3_500)
@@ -266,7 +267,7 @@ class ExternalAutomationBackgroundRunIntegrationTest {
                 process.taskQueueManager,
                 process.pendingRepository,
                 process.parkedRunResumer,
-            )(SESSION_ID, isApproved = true, runId = runId)
+            )(SESSION_ID, process.parkedRequestId(runId), isApproved = true)
             assertEquals(PendingSubmissionOutcome.Resumed, outcome)
             awaitUntil("run COMPLETED after the approval") {
                 process.runRepository.getRun(runId)?.status == PipelineRunStatus.COMPLETED
@@ -365,7 +366,7 @@ class ExternalAutomationBackgroundRunIntegrationTest {
             process.taskQueueManager,
             process.pendingRepository,
             process.parkedRunResumer,
-        )(SESSION_ID, isApproved = false, runId = runId)
+        )(SESSION_ID, process.parkedRequestId(runId), isApproved = false)
         awaitUntil("the request journal settled the terminal status") {
             process.externalJournal.findByRunId(runId)?.status.let {
                 it == ExternalAutomationStatus.Completed || it == ExternalAutomationStatus.Failed
@@ -525,8 +526,8 @@ class ExternalAutomationBackgroundRunIntegrationTest {
             pipelineRunRepository = runRepository,
             runTraceRepository = traceRepository,
             attachmentStore = mockk(relaxed = true),
+            dispatcher = testDispatcher,
         ).apply {
-            dispatcher = testDispatcher
             // The no-progress valve is disabled here: this harness advances a
             // virtual clock while the run really progresses on `Dispatchers.IO`
             // threads the scheduler cannot see, so the window would elapse on a
@@ -641,7 +642,7 @@ class ExternalAutomationBackgroundRunIntegrationTest {
         /** Every notification sent so far, in order. */
         val calls: List<Call> get() = recorded
 
-        override fun notifyOutcome(
+        override suspend fun notifyOutcome(
             returnPackage: String,
             returnAction: String,
             requestId: String,
@@ -697,7 +698,7 @@ class ExternalAutomationBackgroundRunIntegrationTest {
         var lastRunId: String? = null
         var lastOrigin: RunOrigin? = null
 
-        override fun scheduleOneTime(
+        override suspend fun scheduleOneTime(
             prompt: String,
             delayMinutes: Long,
             sessionId: String?,
@@ -720,7 +721,11 @@ class ExternalAutomationBackgroundRunIntegrationTest {
 
         override fun cancelAllScheduled() = Unit
 
-        override fun schedulePeriodic(
+        override suspend fun cancelAllBackgroundRuns() = Unit
+
+        override suspend fun pruneOrphanPrompts(): Int = 0
+
+        override suspend fun schedulePeriodic(
             prompt: String,
             intervalHours: Long,
             sessionId: String?,
@@ -750,7 +755,17 @@ class ExternalAutomationBackgroundRunIntegrationTest {
         val parkedRunResumer: ParkedRunResumer,
         val externalJournal: ExternalAutomationJournalRepositoryImpl,
         val externalCallback: RecordingCallbackNotifier,
-    )
+    ) {
+        /**
+         * Identity of the request run [runId] is parked on — what the buttons
+         * of its notification answer with.
+         *
+         * @param runId The parked run.
+         * @return The request id its record carries.
+         */
+        suspend fun parkedRequestId(runId: String): String =
+            requireNotNull(pendingRepository.getForRun(runId)?.requestId) { "run $runId parks no approval request" }
+    }
 
     private companion object {
         const val GRAPH_ID = "external-graph"

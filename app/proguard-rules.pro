@@ -6,9 +6,13 @@
 #  - reflection-driven code paths (Koog agents, kotlinx.serialization).
 #  - native interop layers that R8 has no AST visibility into
 #    (MediaPipe / LiteRT / SQLCipher).
-#  - AppFunctions KSP-generated wrappers that the platform calls via
-#    reflection at install time.
+#  - the `androidx.appfunctions` library surface (see its section).
 #  - Stack-trace fidelity for Crashlytics.
+#
+# Every class, annotation and package named in a class specification below must
+# exist on the release classpath: R8 matches a wrong name with nothing and says
+# nothing, so `verify<Variant>KeepRuleTargets` checks the names before R8 runs.
+# A rule that is not needed any more is deleted, not left behind as a comment.
 
 # ─── Stack traces ────────────────────────────────────────────────────────────
 # Preserve file + line info so Crashlytics-mapped stacks resolve to the right
@@ -93,12 +97,30 @@
 
 # ─── MediaPipe + LiteRT (native + reflection) ────────────────────────────────
 # JNI bindings reach into Java classes by name; R8 cannot follow native frame.
+# LiteRT-LM ships under `com.google.ai.edge`; no dependency has
+# `org.tensorflow.lite` classes, so no keep rule names that package.
 -keep class com.google.mediapipe.** { *; }
 -keep class com.google.ai.edge.** { *; }
--keep class org.tensorflow.lite.** { *; }
 -dontwarn com.google.mediapipe.**
 -dontwarn com.google.ai.edge.**
 -dontwarn org.tensorflow.lite.**
+
+# ─── MediaPipe usage telemetry: never sent ───────────────────────────────────
+# MediaPipe Tasks attaches an unconditional usage logger to every task it
+# creates (`TaskRunner.create` → `TasksStatsProtoLogger` → `RemoteLoggingClient`),
+# which sends the app id, version and the device's model, fingerprint, country
+# and carrier to Google's Firelog endpoint through DataTransport. The `full`
+# build keeps the DataTransport backend (Crashlytics uploads through it), so the
+# events would leave the device without consent — nothing in the app asks. The
+# logger's one call site goes through the `LoggingClient` interface, so the call
+# is removed there (and on the implementation, in case a direct call appears).
+# Checked on the minified dex by `verify<Variant>NoMediaPipeTelemetry`.
+-assumenosideeffects interface com.google.mediapipe.tasks.core.logging.LoggingClient {
+    public void logEvent(com.google.mediapipe.proto.MediaPipeLoggingProto$MediaPipeLogExtension);
+}
+-assumenosideeffects class com.google.mediapipe.tasks.core.logging.RemoteLoggingClient {
+    public void logEvent(com.google.mediapipe.proto.MediaPipeLoggingProto$MediaPipeLogExtension);
+}
 
 # ─── SQLCipher ───────────────────────────────────────────────────────────────
 # `net.zetetic:sqlcipher-android` loads its native lib by reflection.
@@ -117,17 +139,17 @@
 -keep class io.ktor.** { *; }
 -dontwarn io.ktor.**
 
-# ─── AppFunctions (KSP-generated callee + caller wrappers) ───────────────────
-# `androidx.appfunctions` discovers `*_AppFunctionInventory` and
-# `*_AppFunctionInvoker` classes by reflection at runtime; any `@AppFunction`-
-# annotated method is invoked through the generated invoker. Stripping or
-# renaming either side breaks the system AppFunctions dispatch path.
--keep class * implements androidx.appfunctions.AppFunctionInventory { *; }
--keep class * implements androidx.appfunctions.AppFunctionInvoker { *; }
--keep @androidx.appfunctions.AppFunction class *
--keepclassmembers class * {
-    @androidx.appfunctions.AppFunction <methods>;
-}
+# ─── AppFunctions ────────────────────────────────────────────────────────────
+# What the platform loads BY NAME is the service KSP generates from the entry point
+# (`data.tools.local.appfunctions.KnotworkAppFunctionService`), bound through the
+# manifest — which is what keeps it. The service reaches its inventory and the
+# `@AppFunction` methods by ordinary calls, so R8 may rename those. The rule below
+# keeps the library's whole package as well: it still ships the older auto-merged
+# services and their name-loaded aggregated classes, unused here, and its consumer
+# rules keep `@AppFunctionSerializable` types by annotation. `verify<Variant>Instantiable`
+# checks the generated service is in the dex under its own name. (Four rules here
+# once named the interfaces and the annotation in packages the library does not
+# use, and matched nothing.)
 -keep class androidx.appfunctions.** { *; }
 -dontwarn androidx.appfunctions.**
 
@@ -138,15 +160,6 @@
 -keep class dagger.hilt.** { *; }
 -keep class javax.inject.** { *; }
 -dontwarn dagger.hilt.**
-
-# ─── OpenTelemetry + AutoValue (transitive, optional symbols) ───────────────
-# `io.opentelemetry-api-incubator` and the `auto-value` annotation are
-# compile-time-only optional dependencies referenced by OpenTelemetry SDK
-# internals reachable through Koog. R8 only needs to know it can safely
-# omit warnings — the runtime path that would use them is never executed
-# because the incubator module is not on the runtime classpath.
--dontwarn com.google.auto.value.AutoValue$CopyAnnotations
--dontwarn io.opentelemetry.api.incubator.**
 
 # ─── Room ────────────────────────────────────────────────────────────────────
 # Room's annotation processor generates `*_Impl` classes that subclass our

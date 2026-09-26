@@ -52,10 +52,13 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import kotlin.coroutines.ContinuationInterceptor
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TaskQueueManagerImplTest {
@@ -100,14 +103,57 @@ class TaskQueueManagerImplTest {
             pipelineRunRepository = pipelineRunRepository,
             runTraceRepository = runTraceRepository,
             attachmentStore = attachmentStore,
-        ).apply {
-            dispatcher = testDispatcher
-        }
+            dispatcher = testDispatcher,
+        )
     }
 
     @After
     fun tearDown() {
         Dispatchers.resetMain()
+    }
+
+    /**
+     * The failure message for a session that should have settled on `Error`: the
+     * state it holds plus the queue's own snapshot, so a one-off CI failure says
+     * whether the task was still queued, running, or never picked up.
+     */
+    private fun expectedError(state: AgentOrchestratorState): String =
+        "Expected Error, got $state; ${taskQueueManager.debugSnapshot()}"
+
+    @Test
+    fun `given a dispatcher passed to the constructor then the queue runs on it`() {
+        // Nothing may start anywhere else first: the worker is launched while the
+        // manager is being built, so a dispatcher swapped in afterwards came too late.
+        assertSame(testDispatcher, taskQueueManager.scope.coroutineContext[ContinuationInterceptor])
+    }
+
+    @Test
+    fun `given a finished run when the session's next task is cancelled before pickup then the session settles`() =
+        testScope.runTest {
+            // The first task settles on Error at once (empty library).
+            every { pipelineRepository.getAllPipelines() } returns flowOf(emptyList())
+            taskQueueManager.enqueueTask(AgentTask(sessionId = "a", prompt = "one", priority = TaskPriority.NORMAL))
+            advanceUntilIdle()
+
+            // The second is queued and stopped before the worker takes it: the
+            // finished first run must not pass for the one to cancel.
+            taskQueueManager.enqueueTask(AgentTask(sessionId = "a", prompt = "two", priority = TaskPriority.NORMAL))
+            taskQueueManager.cancelRun("a")
+            advanceUntilIdle()
+
+            assertEquals(AgentOrchestratorState.Idle, taskQueueManager.observeTaskState("a").first())
+        }
+
+    @Test
+    fun `given a settled task when the snapshot is read then it names an idle live worker`() = testScope.runTest {
+        every { pipelineRepository.getAllPipelines() } returns flowOf(emptyList())
+        taskQueueManager.enqueueTask(AgentTask(sessionId = "s", prompt = "go", priority = TaskPriority.NORMAL))
+        advanceUntilIdle()
+
+        assertEquals(
+            "queued=0 workerBusy=false workerAlive=true activeRun=null global=Error",
+            taskQueueManager.debugSnapshot(),
+        )
     }
 
     @Test
@@ -355,7 +401,7 @@ class TaskQueueManagerImplTest {
         advanceUntilIdle()
 
         val state = taskQueueManager.observeTaskState("session-no-default").first()
-        assertTrue("Expected Error, got $state", state is AgentOrchestratorState.Error)
+        assertTrue(expectedError(state), state is AgentOrchestratorState.Error)
         assertEquals(
             "No default pipeline configured. Set one in Settings or bind a pipeline to this chat.",
             (state as AgentOrchestratorState.Error).message,
@@ -386,7 +432,7 @@ class TaskQueueManagerImplTest {
         advanceUntilIdle()
 
         val state = taskQueueManager.observeTaskState("session-orphaned-no-default").first()
-        assertTrue("Expected Error, got $state", state is AgentOrchestratorState.Error)
+        assertTrue(expectedError(state), state is AgentOrchestratorState.Error)
         verify(exactly = 0) { graphExecutionEngine.invoke(any(), any(), any(), any()) }
     }
 
@@ -410,7 +456,7 @@ class TaskQueueManagerImplTest {
         advanceUntilIdle()
 
         val state = taskQueueManager.observeTaskState("session-empty-library").first()
-        assertTrue("Expected Error, got $state", state is AgentOrchestratorState.Error)
+        assertTrue(expectedError(state), state is AgentOrchestratorState.Error)
         assertEquals(
             "No active pipeline found. Please create one in the Visual Orchestrator.",
             (state as AgentOrchestratorState.Error).message,
@@ -490,7 +536,7 @@ class TaskQueueManagerImplTest {
         advanceUntilIdle()
 
         val state = taskQueueManager.observeTaskState(sessionId).first()
-        assertTrue("Expected Error, got $state", state is AgentOrchestratorState.Error)
+        assertTrue(expectedError(state), state is AgentOrchestratorState.Error)
         assertEquals("engine blew up", (state as AgentOrchestratorState.Error).message)
     }
 
@@ -605,6 +651,32 @@ class TaskQueueManagerImplTest {
 
         coVerify { pipelineRunRepository.finishRun(task.id, PipelineRunStatus.FAILED, "engine blew up", null) }
     }
+
+    @Test
+    fun `given the engine throws with a credential in its message then neither the record nor the state carries it`() =
+        testScope.runTest {
+            // The run record's message is what the chat export and the trigger-journal
+            // export share; the state is what the error banner shows.
+            val leakedKey = "AIzaSyTESTKEY"
+            every { graphExecutionEngine.invoke(any(), any(), any(), any()) } returns flow {
+                emit(AgentOrchestratorState.Loading)
+                throw IllegalStateException(
+                    "Socket timeout [url=https://generativelanguage.googleapis.com/x?key=$leakedKey]",
+                )
+            }
+            val recorded = slot<String>()
+            coEvery { pipelineRunRepository.finishRun(any(), any(), capture(recorded), any()) } returns Unit
+
+            val task = AgentTask(sessionId = "session_leak", prompt = "p")
+            taskQueueManager.enqueueTask(task)
+            advanceUntilIdle()
+
+            val state = taskQueueManager.observeTaskState(task.sessionId).first() as AgentOrchestratorState.Error
+            for (text in listOf(recorded.captured, state.message)) {
+                assertFalse("key leaked: $text", text.contains(leakedKey))
+                assertTrue("scrub marker missing: $text", text.contains("key=***"))
+            }
+        }
 
     /**
      * Pipeline-resolution failures (no binding, no default) never reach the
@@ -1130,7 +1202,7 @@ class TaskQueueManagerImplTest {
     fun `given a run waiting on an approval gate then the window does not apply`() = testScope.runTest {
         val window = taskQueueManager.silenceTimeoutMs
         every { graphExecutionEngine.invoke(any(), any(), any(), any()) } returns flow {
-            emit(AgentOrchestratorState.WaitingForApproval("echo", "{}", ToolRisk.SENSITIVE))
+            emit(AgentOrchestratorState.WaitingForApproval("echo", "{}", ToolRisk.SENSITIVE, "req-1"))
             delay(window * 3)
             emit(AgentOrchestratorState.Completed("approved and done"))
         }
@@ -1152,7 +1224,7 @@ class TaskQueueManagerImplTest {
     @Test
     fun `given silence after an approved tool starts then the run is still failed`() = testScope.runTest {
         every { graphExecutionEngine.invoke(any(), any(), any(), any()) } returns flow {
-            emit(AgentOrchestratorState.WaitingForApproval("echo", "{}", ToolRisk.SENSITIVE))
+            emit(AgentOrchestratorState.WaitingForApproval("echo", "{}", ToolRisk.SENSITIVE, "req-1"))
             emit(AgentOrchestratorState.ExecutingTool("echo", "{}"))
             awaitCancellation()
         }

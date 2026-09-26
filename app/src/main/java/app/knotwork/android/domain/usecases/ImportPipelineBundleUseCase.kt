@@ -2,8 +2,10 @@ package app.knotwork.android.domain.usecases
 
 import app.knotwork.android.domain.models.ImportCollisionResolution
 import app.knotwork.android.domain.models.PipelineBundleImportOutcome
+import app.knotwork.android.domain.models.PipelineCollision
 import app.knotwork.android.domain.models.PipelineGraph
 import app.knotwork.android.domain.models.PipelineValidationException
+import app.knotwork.android.domain.pipelineio.ImportedPipelineClaims
 import app.knotwork.android.domain.pipelineio.PipelineBundleIdRemapper
 import app.knotwork.android.domain.pipelineio.PipelineBundleJsonSerializer
 import app.knotwork.android.domain.repositories.PipelineRepository
@@ -25,7 +27,9 @@ import javax.inject.Inject
  * 1. [prepare] parses the file (delegating to
  *    [PipelineBundleJsonSerializer.parse]), validates every graph
  *    structurally, and detects which pipeline ids already exist in the
- *    library. It performs no write.
+ *    library — describing each by the library pipeline's own name and what
+ *    is bound to it, since Replace hands those bindings to the imported
+ *    graph. It performs no write.
  * 2. [persist] applies the chosen [ImportCollisionResolution] and writes the
  *    whole closure **atomically** — a single structurally-broken graph rolls
  *    back the entire import.
@@ -33,6 +37,7 @@ import javax.inject.Inject
 class ImportPipelineBundleUseCase @Inject constructor(
     private val pipelineRepository: PipelineRepository,
     private val compositionValidator: PipelineCompositionValidator,
+    private val findPipelineBindings: FindPipelineBindingsUseCase,
 ) {
 
     /**
@@ -46,7 +51,7 @@ class ImportPipelineBundleUseCase @Inject constructor(
      *   a contained graph is structurally invalid.
      */
     suspend fun prepare(jsonText: String): PipelineBundlePrepareResult {
-        val (pipelines, mismatches) = when (val outcome = PipelineBundleJsonSerializer.parse(jsonText)) {
+        val (parsed, mismatches) = when (val outcome = PipelineBundleJsonSerializer.parse(jsonText)) {
             is PipelineBundleImportOutcome.Failure ->
                 return PipelineBundlePrepareResult.Failure(outcome.message)
 
@@ -54,6 +59,7 @@ class ImportPipelineBundleUseCase @Inject constructor(
 
             is PipelineBundleImportOutcome.PartialSchemaMismatch -> outcome.pipelines to outcome.mismatches
         }
+        val pipelines = parsed.map(ImportedPipelineClaims::checked)
 
         // Per-graph structural validation, then cross-pipeline composition
         // validation resolved against the incoming set (so intra-bundle cycles,
@@ -68,18 +74,31 @@ class ImportPipelineBundleUseCase @Inject constructor(
             errors.takeIf { it.isNotEmpty() }?.let { graph to it }
         }?.let { (graph, errors) ->
             return PipelineBundlePrepareResult.Failure(
-                "Pipeline \"${graph.name}\" is invalid: ${PipelineValidationException(errors).message}",
+                "Pipeline \"${graph.name}\" is invalid: " +
+                    PipelineValidationException(errors).message,
             )
         }
 
         // Lightweight existence check: id → name projection, one query, no graph
         // materialisation (vs. getPipelineById per id, which loads full graphs).
-        val existingIds = pipelineRepository.observePipelineNames().first().keys
-        val collidingIds = pipelines.map { it.id }.filter { it in existingIds }
+        val existingNames = pipelineRepository.observePipelineNames().first()
+        // Every id is looked up, not only the ones the library holds: a deleted
+        // pipeline's id is free in the library while its chats, triggers and
+        // callers still name it, and keeping it would re-bind them to the file.
+        val bindings = findPipelineBindings(pipelines.map { it.id })
+        val collisions = pipelines
+            .filter { it.id in existingNames || !bindings.getValue(it.id).isEmpty }
+            .map { graph ->
+                PipelineCollision(
+                    incoming = graph,
+                    existingName = existingNames[graph.id],
+                    bindings = bindings.getValue(graph.id),
+                )
+            }
 
         return PipelineBundlePrepareResult.Ready(
             pipelines = pipelines,
-            collidingIds = collidingIds,
+            collisions = collisions,
             schemaMismatches = mismatches,
         )
     }
@@ -135,15 +154,16 @@ sealed class PipelineBundlePrepareResult {
      * the caller picks a collision resolution.
      *
      * @property pipelines The pipelines to persist, in file order.
-     * @property collidingIds The subset of pipeline ids that already exist in
-     *   the library. Empty means no dialog is needed and the import may persist
+     * @property collisions The pipelines whose ids already exist in the
+     *   library, each with the existing pipeline's name and bindings, in file
+     *   order. Empty means no dialog is needed and the import may persist
      *   straight away with [ImportCollisionResolution.REPLACE].
      * @property schemaMismatches Per-pipeline schema-version divergences to
      *   surface as a compatibility warning, if any.
      */
     data class Ready(
         val pipelines: List<PipelineGraph>,
-        val collidingIds: List<String>,
+        val collisions: List<PipelineCollision>,
         val schemaMismatches: List<PipelineBundleImportOutcome.SchemaMismatch>,
     ) : PipelineBundlePrepareResult()
 

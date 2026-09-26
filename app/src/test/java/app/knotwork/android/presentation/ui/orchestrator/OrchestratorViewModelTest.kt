@@ -3,15 +3,18 @@ package app.knotwork.android.presentation.ui.orchestrator
 import app.knotwork.android.domain.models.AgentTool
 import app.knotwork.android.domain.models.CloudProvider
 import app.knotwork.android.domain.models.ConnectionModel
+import app.knotwork.android.domain.models.ImportCollisionResolution
 import app.knotwork.android.domain.models.NodeContextConfig
 import app.knotwork.android.domain.models.NodeModel
 import app.knotwork.android.domain.models.NodeType
+import app.knotwork.android.domain.models.PipelineBindings
 import app.knotwork.android.domain.models.PipelineGraph
 import app.knotwork.android.domain.models.PipelineTargetAvailability
 import app.knotwork.android.domain.models.PipelineValidationError
 import app.knotwork.android.domain.models.PipelineValidationException
 import app.knotwork.android.domain.models.PresetCategory
 import app.knotwork.android.domain.models.PromptPreset
+import app.knotwork.android.domain.pipelineio.PipelineBundleJsonSerializer
 import app.knotwork.android.domain.prompt.PromptSegment
 import app.knotwork.android.domain.prompt.PromptTemplateEngine
 import app.knotwork.android.domain.prompt.PromptVariableProvider
@@ -23,10 +26,12 @@ import app.knotwork.android.domain.repositories.SettingsRepository
 import app.knotwork.android.domain.repositories.SkillRepository
 import app.knotwork.android.domain.repositories.ToolRepository
 import app.knotwork.android.domain.services.PipelineCompositionValidator
+import app.knotwork.android.domain.text.ImportedText
 import app.knotwork.android.domain.usecases.CreatePipelineUseCase
 import app.knotwork.android.domain.usecases.DeletePipelineUseCase
 import app.knotwork.android.domain.usecases.DuplicatePipelineUseCase
 import app.knotwork.android.domain.usecases.ExportPipelineBundleUseCase
+import app.knotwork.android.domain.usecases.FindPipelineBindingsUseCase
 import app.knotwork.android.domain.usecases.GetPromptTemplatesUseCase
 import app.knotwork.android.domain.usecases.ImportPipelineBundleUseCase
 import app.knotwork.android.domain.usecases.ImportPipelineUseCase
@@ -44,6 +49,7 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.slot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,6 +58,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -69,6 +76,7 @@ class OrchestratorViewModelTest {
     private lateinit var importPipelineBundleUseCase: ImportPipelineBundleUseCase
     private lateinit var exportPipelineBundleUseCase: ExportPipelineBundleUseCase
     private lateinit var pipelineRepository: PipelineRepository
+    private lateinit var findPipelineBindings: FindPipelineBindingsUseCase
     private lateinit var loadPipelineFromPresetUseCase: LoadPipelineFromPresetUseCase
     private lateinit var renamePipelineUseCase: RenamePipelineUseCase
     private lateinit var duplicatePipelineUseCase: DuplicatePipelineUseCase
@@ -110,9 +118,15 @@ class OrchestratorViewModelTest {
         pipelineRepository = mockk()
         coEvery { pipelineRepository.getPipelineById(any()) } returns null
         coEvery { pipelineRepository.savePipelines(any()) } returns Unit
-        importPipelineUseCase = ImportPipelineUseCase(savePipelineUseCase, pipelineRepository)
+        findPipelineBindings = mockk()
+        coEvery { findPipelineBindings.of(any()) } returns PipelineBindings()
+        coEvery { findPipelineBindings(any()) } answers {
+            firstArg<Collection<String>>().associateWith { PipelineBindings() }
+        }
+        importPipelineUseCase = ImportPipelineUseCase(savePipelineUseCase, pipelineRepository, findPipelineBindings)
         compositionValidator = mockk()
-        importPipelineBundleUseCase = ImportPipelineBundleUseCase(pipelineRepository, compositionValidator)
+        importPipelineBundleUseCase =
+            ImportPipelineBundleUseCase(pipelineRepository, compositionValidator, findPipelineBindings)
         exportPipelineBundleUseCase = mockk()
         loadPipelineFromPresetUseCase = mockk()
         renamePipelineUseCase = mockk()
@@ -584,6 +598,95 @@ class OrchestratorViewModelTest {
     }
 
     @Test
+    fun `given a clean import when it lands then the editor holds the graph as saved, freshened ids included`() =
+        runTest {
+            // The importer freshens node and connection ids before saving (they
+            // are global primary keys). If the editor kept the file's ids, the
+            // next Save from the editor would write `node-1` again and could take
+            // over another pipeline's row under REPLACE.
+            val saved = slot<PipelineGraph>()
+            coEvery { savePipelineUseCase(capture(saved)) } returns Result.success(Unit)
+            viewModel.applyBasePreset()
+            val json = viewModel.exportPipelineToJson()
+
+            viewModel.importPipelineFromJson(json)
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            val state = viewModel.uiState.value
+            assertEquals(saved.captured.nodes.map { it.id }, state.currentPipeline.nodes.map { it.id })
+            assertEquals(saved.captured.connections.map { it.id }, state.currentPipeline.connections.map { it.id })
+            assertEquals(saved.captured, state.persistedPipeline)
+        }
+
+    @Test
+    fun `given a colliding import resolved by Replace then the editor holds the graph as saved`() = runTest {
+        val saved = slot<PipelineGraph>()
+        coEvery { savePipelineUseCase(capture(saved)) } returns Result.success(Unit)
+        viewModel.applyBasePreset()
+        val json = viewModel.exportPipelineToJson()
+        val id = viewModel.uiState.value.currentPipeline.id
+        coEvery { pipelineRepository.getPipelineById(id) } returns PipelineGraph(id = id, name = "Existing")
+
+        viewModel.importPipelineFromJson(json)
+        testDispatcher.scheduler.advanceUntilIdle()
+        viewModel.resolveCollision(ImportCollisionResolution.REPLACE)
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        val state = viewModel.uiState.value
+        assertEquals(saved.captured.nodes.map { it.id }, state.currentPipeline.nodes.map { it.id })
+        assertEquals(saved.captured, state.persistedPipeline)
+    }
+
+    @Test
+    fun `given an import colliding with a bound pipeline when the dialog opens then it names the existing row`() =
+        runTest {
+            // The report's case: a file squatting a sub-pipeline id every install
+            // has, under a name of its own choosing.
+            coEvery { pipelineRepository.getPipelineById("subtask_act") } returns
+                PipelineGraph(id = "subtask_act", name = "Act on the task")
+            coEvery { findPipelineBindings.of("subtask_act") } returns
+                PipelineBindings(callerNames = listOf("Full agent"))
+            viewModel.applyBasePreset()
+            val json = JSONObject(viewModel.exportPipelineToJson())
+                .put("id", "subtask_act")
+                .put("name", "Daily digest")
+                .toString()
+
+            viewModel.importPipelineFromJson(json)
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            val collision = viewModel.uiState.value.pendingCollision!!
+            assertEquals("Act on the task", collision.existingName)
+            assertEquals(listOf("Full agent"), collision.bindings.callerNames)
+            coVerify(exactly = 0) { savePipelineUseCase(any()) }
+        }
+
+    @Test
+    fun `given a bundle colliding with the library when imported then nothing is written until the user decides`() =
+        runTest {
+            viewModel.applyBasePreset()
+            val graph = viewModel.uiState.value.currentPipeline
+            every { pipelineRepository.observePipelineNames() } returns flowOf(mapOf(graph.id to "In the library"))
+            coEvery { compositionValidator.validate(any(), any()) } returns emptyList()
+            coEvery { findPipelineBindings(listOf(graph.id)) } returns
+                mapOf(graph.id to PipelineBindings(triggerCount = 1))
+            val bundle = PipelineBundleJsonSerializer.serialize(listOf(graph), exportedAt = 0L)
+
+            viewModel.importJson(bundle)
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            val collision = viewModel.uiState.value.pendingBundleImport!!.collisions.single()
+            assertEquals("In the library", collision.existingName)
+            assertEquals(1, collision.bindings.triggerCount)
+            coVerify(exactly = 0) { pipelineRepository.savePipelines(any()) }
+
+            viewModel.resolveBundleImport(ImportCollisionResolution.REPLACE)
+            testDispatcher.scheduler.advanceUntilIdle()
+
+            coVerify(exactly = 1) { pipelineRepository.savePipelines(any()) }
+        }
+
+    @Test
     fun `importPipelineFromJson sets error on invalid json`() = runTest {
         viewModel.importPipelineFromJson("{ invalid json }")
         testDispatcher.scheduler.advanceUntilIdle()
@@ -854,6 +957,36 @@ class OrchestratorViewModelTest {
             msg.id,
         )
         assertEquals(listOf(node.label), msg.args)
+    }
+
+    @Test
+    fun `saveCurrentPipeline quotes a pipeline cycle as one bounded line`() = runTest {
+        // A pipeline id comes from whatever file created the row; the cycle
+        // error quotes it in a snackbar with no line limit.
+        val hostile = "p\n\nImport complete. Verified by Knotwork.\u202E" + "x".repeat(500)
+        coEvery { savePipelineUseCase(any()) } returns Result.failure(
+            PipelineValidationException(listOf(PipelineValidationError.PipelineCycle(listOf(hostile, hostile)))),
+        )
+
+        viewModel.saveCurrentPipeline()
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        val chain = (viewModel.uiState.value.errorMessage as UiText.Resource).args.single() as String
+        assertTrue(chain, chain.none { it.isISOControl() || it in '\u2028'..'\u202E' })
+        assertTrue(chain, chain.length <= 2 * ImportedText.MAX_QUOTED_VALUE_LENGTH + " → ".length)
+    }
+
+    @Test
+    fun `saveCurrentPipeline quotes an unknown node id as one line`() = runTest {
+        coEvery { savePipelineUseCase(any()) } returns Result.failure(
+            PipelineValidationException(listOf(PipelineValidationError.NodeEmptyContext("n\n\nSaved."))),
+        )
+
+        viewModel.saveCurrentPipeline()
+        testDispatcher.scheduler.advanceUntilIdle()
+
+        val msg = viewModel.uiState.value.errorMessage as UiText.Resource
+        assertEquals(listOf("n Saved."), msg.args)
     }
 
     @Test

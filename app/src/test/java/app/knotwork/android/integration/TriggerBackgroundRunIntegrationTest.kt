@@ -239,6 +239,7 @@ class TriggerBackgroundRunIntegrationTest {
         coEvery { chatRepository.sessionExists(SESSION_ID) } returns true
 
         settingsRepository = mockk()
+        every { settingsRepository.workspaceReadTokenBudget } returns flowOf(2_000)
         every { settingsRepository.verboseMemoryLoggingEnabled } returns flowOf(false)
         every { settingsRepository.chatHistoryCompressionEnabled } returns flowOf(false)
         every { settingsRepository.chatHistoryCompressionThresholdTokens } returns flowOf(3_500)
@@ -371,7 +372,7 @@ class TriggerBackgroundRunIntegrationTest {
                     process.taskQueueManager.pendingApproval(SESSION_ID) == null
             }
             verify(atLeast = 1) {
-                process.approvalNotifier.sendApprovalRequest(any(), any(), any(), any())
+                process.approvalNotifier.sendApprovalRequest(any(), any(), any(), any(), any())
             }
 
             // ── Approve from the notification — the run resumes and completes ──
@@ -379,7 +380,7 @@ class TriggerBackgroundRunIntegrationTest {
                 process.taskQueueManager,
                 process.pendingRepository,
                 process.parkedRunResumer,
-            )(SESSION_ID, isApproved = true, runId = runId)
+            )(SESSION_ID, process.parkedRequestId(runId), isApproved = true)
             assertEquals(PendingSubmissionOutcome.Resumed, submission)
 
             awaitUntil("run COMPLETED after approval") {
@@ -586,8 +587,8 @@ class TriggerBackgroundRunIntegrationTest {
             pipelineRunRepository = runRepository,
             runTraceRepository = traceRepository,
             attachmentStore = mockk(relaxed = true),
+            dispatcher = testDispatcher,
         ).apply {
-            dispatcher = testDispatcher
             // The no-progress valve is disabled here: this harness advances a
             // virtual clock while the run really progresses on `Dispatchers.IO`
             // threads the scheduler cannot see, so the window would elapse on a
@@ -672,7 +673,7 @@ class TriggerBackgroundRunIntegrationTest {
         var lastPipelineId: String? = null
         var lastOrigin: RunOrigin? = null
 
-        override fun scheduleOneTime(
+        override suspend fun scheduleOneTime(
             prompt: String,
             delayMinutes: Long,
             sessionId: String?,
@@ -698,7 +699,11 @@ class TriggerBackgroundRunIntegrationTest {
         /** Unused by the trigger path under test. */
         override fun cancelAllScheduled() = Unit
 
-        override fun schedulePeriodic(
+        override suspend fun cancelAllBackgroundRuns() = Unit
+
+        override suspend fun pruneOrphanPrompts(): Int = 0
+
+        override suspend fun schedulePeriodic(
             prompt: String,
             intervalHours: Long,
             sessionId: String?,
@@ -726,7 +731,17 @@ class TriggerBackgroundRunIntegrationTest {
         val approvalNotifier: ApprovalNotifier,
         val parkedRunResumer: ParkedRunResumer,
         val triggerJournal: TriggerJournalRepositoryImpl,
-    )
+    ) {
+        /**
+         * Identity of the request run [runId] is parked on — what the buttons
+         * of its notification answer with.
+         *
+         * @param runId The parked run.
+         * @return The request id its record carries.
+         */
+        suspend fun parkedRequestId(runId: String): String =
+            requireNotNull(pendingRepository.getForRun(runId)?.requestId) { "run $runId parks no approval request" }
+    }
 
     private companion object {
         const val GRAPH_ID = "trigger-graph"

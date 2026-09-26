@@ -4,7 +4,9 @@ import app.knotwork.android.domain.models.ConnectionModel
 import app.knotwork.android.domain.models.ImportCollisionResolution
 import app.knotwork.android.domain.models.NodeModel
 import app.knotwork.android.domain.models.NodeType
+import app.knotwork.android.domain.models.PipelineBindings
 import app.knotwork.android.domain.models.PipelineGraph
+import app.knotwork.android.domain.models.PipelineSamplePrompt
 import app.knotwork.android.domain.pipelineio.PipelineBundleJsonSerializer
 import app.knotwork.android.domain.pipelineio.PipelineBundleTestFixtures.linearGraph
 import app.knotwork.android.domain.repositories.PipelineRepository
@@ -19,6 +21,7 @@ import io.mockk.slot
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -31,6 +34,7 @@ class ImportPipelineBundleUseCaseTest {
 
     private lateinit var pipelineRepository: PipelineRepository
     private lateinit var settingsRepository: SettingsRepository
+    private lateinit var findPipelineBindings: FindPipelineBindingsUseCase
     private lateinit var useCase: ImportPipelineBundleUseCase
 
     @Before
@@ -43,9 +47,13 @@ class ImportPipelineBundleUseCaseTest {
         coEvery { pipelineRepository.getPipelineById(any()) } returns null
         every { pipelineRepository.observePipelineNames() } returns flowOf(emptyMap())
         coEvery { pipelineRepository.savePipelines(any()) } returns Unit
+        findPipelineBindings = mockk()
+        coEvery { findPipelineBindings(any()) } answers
+            { firstArg<Collection<String>>().associateWith { PipelineBindings() } }
         useCase = ImportPipelineBundleUseCase(
             pipelineRepository,
             PipelineCompositionValidator(pipelineRepository, settingsRepository),
+            findPipelineBindings,
         )
     }
 
@@ -80,6 +88,29 @@ class ImportPipelineBundleUseCaseTest {
     }
 
     @Test
+    fun `given a bundle pipeline hinting a tool it does not call when prepare then the hint is dropped`() = runTest {
+        val graph = PipelineGraph(
+            id = "p1",
+            name = "Hinted",
+            nodes = listOf(
+                NodeModel(id = "in", type = NodeType.INPUT, x = 0f, y = 0f),
+                NodeModel(id = "t", type = NodeType.TOOL, x = 0f, y = 0f, toolName = "delete_file"),
+                NodeModel(id = "out", type = NodeType.OUTPUT, x = 0f, y = 0f),
+            ),
+            connections = listOf(
+                ConnectionModel(id = "c1", sourceNodeId = "in", targetNodeId = "t"),
+                ConnectionModel(id = "c2", sourceNodeId = "t", targetNodeId = "out"),
+            ),
+            updatedAt = 0L,
+            samplePrompts = listOf(PipelineSamplePrompt(title = "Tidy up my notes", toolsHint = "read_file")),
+        )
+
+        val ready = useCase.prepare(bundleOf(graph)) as PipelineBundlePrepareResult.Ready
+
+        assertNull(ready.pipelines.single().samplePrompts.single().toolsHint)
+    }
+
+    @Test
     fun `given a collision when prepare then it is reported and nothing persisted`() = runTest {
         every { pipelineRepository.observePipelineNames() } returns flowOf(mapOf("root" to "Root"))
         val json = bundleOf(linearGraph("root", targets = listOf("sub")), linearGraph("sub"))
@@ -87,8 +118,44 @@ class ImportPipelineBundleUseCaseTest {
         val prepared = useCase.prepare(json)
 
         assertTrue(prepared is PipelineBundlePrepareResult.Ready)
-        assertEquals(listOf("root"), (prepared as PipelineBundlePrepareResult.Ready).collidingIds)
+        assertEquals(listOf("root"), (prepared as PipelineBundlePrepareResult.Ready).collisions.map { it.incoming.id })
         coVerify(exactly = 0) { pipelineRepository.savePipelines(any()) }
+    }
+
+    @Test
+    fun `given a collision when prepare then it names the library pipeline and what is bound to it`() = runTest {
+        every { pipelineRepository.observePipelineNames() } returns flowOf(mapOf("sub" to "Act on the task"))
+        coEvery { findPipelineBindings(any()) } answers {
+            firstArg<Collection<String>>().associateWith { id ->
+                if (id == "sub") PipelineBindings(callerNames = listOf("Full agent")) else PipelineBindings()
+            }
+        }
+        val json = bundleOf(linearGraph("root", targets = listOf("sub")), linearGraph("sub"))
+
+        val collision = (useCase.prepare(json) as PipelineBundlePrepareResult.Ready).collisions.single()
+
+        assertEquals("sub", collision.incoming.id)
+        assertEquals("Act on the task", collision.existingName)
+        assertEquals(listOf("Full agent"), collision.bindings.callerNames)
+    }
+
+    @Test
+    fun `given a bundle pipeline whose free id something is still bound to when prepare then it asks`() = runTest {
+        // A deleted pipeline's id: no library row, but a trigger still names it.
+        // Persisting with the ids kept would hand the trigger the file's graph.
+        coEvery { findPipelineBindings(any()) } answers {
+            firstArg<Collection<String>>().associateWith { id ->
+                if (id == "sub") PipelineBindings(triggerCount = 1) else PipelineBindings()
+            }
+        }
+        val json = bundleOf(linearGraph("root", targets = listOf("sub")), linearGraph("sub"))
+
+        val ready = useCase.prepare(json) as PipelineBundlePrepareResult.Ready
+
+        val collision = ready.collisions.single()
+        assertEquals("sub", collision.incoming.id)
+        assertNull(collision.existingName)
+        assertEquals(1, collision.bindings.triggerCount)
     }
 
     @Test

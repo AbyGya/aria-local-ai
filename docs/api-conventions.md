@@ -44,12 +44,15 @@ interface LiteRtRepository {
   their qualified name (`"${packageName}/${id}"`) so identical ids
   from different packages can coexist. `ToolRepositoryImpl` merges the
   discovered set into the visible tool catalogue.
-- **Callee-side** wrappers live in `data/tools/local/appfunctions/`
-  annotated with `androidx.appfunctions.service.AppFunction`. The
-  auto-merged `androidx.appfunctions.service.PlatformAppFunctionService`
-  (from `appfunctions-service`) dispatches incoming requests through
-  KSP-generated invokers. Do **not** subclass `AppFunctionService` or
-  write a manual router; the recipe for a new wrapper lives in
+- **Callee-side**, every published function is declared on the one entry
+  point, `data/tools/local/appfunctions/AgentAppFunctionService` — an
+  abstract `androidx.appfunctions.AppFunctionService` annotated
+  `@AppFunctionServiceEntryPoint`. The AppFunctions compiler generates the
+  concrete service and its dispatch; the app registers that service in its
+  manifest (`AppFunctionServiceManifestGuardTest` holds the two in step).
+  Do **not** write a manual router or a second entry point, and keep each
+  `@AppFunction` a one-line delegation to an injectable class that holds the
+  logic. Android 16+ only. The recipe for a new function lives in
   [`extending.md`](extending.md) §2.5.
 - **`AppFunctionDataCodec` is the single point of serialization.** Every
   conversion between the LLM-emitted JSON argument string and the typed
@@ -61,9 +64,8 @@ interface LiteRtRepository {
   walking in callers — the codec is the source of truth for type
   coercion rules and `IllegalArgumentException` boundaries.
 - **`ToolRepository.getRisk(name)` is the single source of truth for
-  HITL.** The gate in `ToolNodeExecutor` consults it once per
-  invocation, never the legacy `SettingsRepository.requiresUserConfirmation`
-  flag in isolation. The risk resolves through three layers:
+  HITL.** The gate (`ToolInvocationGate`) consults it once per
+  invocation. The risk resolves through three layers:
   built-in defaults (`search_tool` → `READ_ONLY`,
   `schedule_task` / `delegate_task` → `SENSITIVE`), per-tool overrides
   for discovered AppFunctions (keyed by tool name) and for MCP tools
@@ -74,8 +76,31 @@ interface LiteRtRepository {
   server's — MCP's `readOnlyHint` / `destructiveHint` annotations are
   deliberately not consulted, since a server able to declare its own
   tools read-only could walk straight past the gate.
-  `requiresUserConfirmation` is now an opt-in "ask on every single call"
-  override and never silences `SENSITIVE` / `DESTRUCTIVE`.
+- **Which risks ask is `ToolApprovalPolicy.requiresApproval(risk)` —
+  written once, interpreted nowhere else.** `AllCalls` asks for every
+  call, `SensitiveOrDestructive` (the default) for `SENSITIVE` and
+  `DESTRUCTIVE`, `NeverPrompt` for `DESTRUCTIVE` only: **no policy quiets
+  a `DESTRUCTIVE` call.** The one control that removes its prompt is
+  *Block destructive tools*, and it refuses the call instead of running
+  it. A node's `alwaysConfirm` (TOOL and SKILL — the node types that
+  dispatch tools) is ORed on top and can only add a prompt;
+  `ToolInvocationGate.dispatch` takes it without a default, so a new node
+  type that dispatches tools has to pass its own. The legacy
+  `requires_user_confirmation` DataStore key is a migration input only.
+- **An approval answers a request, never a session.** The gate mints a
+  `requestId` for every request it raises; the chat card, both
+  notifications and the parked record carry it, and every answer goes
+  through `SubmitApprovalDecisionUseCase`, which settles only the request
+  it names. A parked request and a live one coexist in one session, so
+  "whatever the session is waiting on" is not an address. A new answering
+  surface carries the id; a new caller of `resumeWithApproval`,
+  `executeTool` or `invokeByName` fails `HitlDispatchKonsistTest`.
+- **A recorded answer applies only to the call it answered.** A run resumed
+  from its parked record applies the user's decision only when the
+  re-resolved call has the same name and arguments and — for an approval —
+  the same risk as the card the user saw. Anything else raises the question
+  again, whatever the policy: a quiet policy never settles a question that
+  was already asked. A denial applies at any risk.
 
 ```kotlin
 enum class ToolRisk { READ_ONLY, SENSITIVE, DESTRUCTIVE }
@@ -118,12 +143,33 @@ interface Tool {
   call unbounded. `withTimeoutOrNull` rather than `withTimeout`, because a
   timeout surfacing as a `CancellationException` would propagate past the
   tool-error mapping and cancel the entire run.
-- **MCP credentials** (Bearer tokens, Basic passwords, API-key values) are
-  stored in the **Keystore-backed encrypted store**, keyed per server by a hash
-  of its URL — never in the plain `mcp_servers_json` DataStore entry, which
-  holds only non-secret metadata (URL, transport, name, custom headers). Auth
-  embedded inline by earlier releases is migrated into the encrypted store on
-  first read and stripped from the JSON.
+- **One server per tool name.** Which server answers a name is decided by one
+  rule, `McpToolRouting` in the domain layer, and read everywhere — the agent
+  catalogue, `ToolRepository.getRisk`, `executeTool` and the Tools screen. A
+  local tool (built-in or AppFunction, disabled included) owns its name;
+  otherwise the first server in the user's order with the name switched on
+  serves it, and every other entry is left out of the catalogue. There is no
+  failover to another server after an error. The gate passes the risk it
+  decided on (`ToolExecutionContext.gatedRisk`) and the dispatch refuses a call
+  whose serving server's risk no longer matches. Never pick an MCP server for a
+  name any other way: `McpRoutingMatrixTest` runs every routing state of two
+  servers and fails a second resolver.
+- **Everything a server sends is bounded in `KoogMcpClient`**, the one place
+  that covers both the agent and the Tools screen: a name outside the MCP
+  naming rule is not published (nor callable), descriptions are clamped, the
+  catalogue is capped by tool count and rendered size, and a result (or an
+  error message sent instead) is cut at the user's `httpToolMaxResponseBytes`
+  budget with a marker. Read MCP content
+  through the client, never around it.
+- **MCP credentials** (Bearer tokens, Basic passwords, API-key values) **and
+  custom headers** are stored in the **Keystore-backed encrypted store**, keyed
+  per server by a hash of its URL — never in the plain `mcp_servers_json`
+  DataStore entry, which holds only non-secret metadata (URL, transport, name).
+  Headers count as secret whole: the form invites an `Authorization` row. Auth
+  and headers kept inline by earlier releases are migrated into the encrypted
+  store on first read — the encrypted copy committed before the inline one is
+  stripped — and a stored secret's parse error is logged by type only (on
+  Android a `JSONException` message carries the whole input).
 
 ---
 
@@ -154,10 +200,15 @@ interface Tool {
   repository.
 - The **Hugging Face access token** used to install gated models from the
   Discover screen lives in the **same Keystore-backed store** (keyed
-  `hugging_face_token`), never in plain DataStore. It is sent only on the file
-  download that needs it — discovery browsing and metadata calls are anonymous.
-- **Every cloud client carries an explicit `ConnectionTimeoutConfig`**, applied in
-  `KoogClientFactory`: 60 s socket, 30 s connect, 900 s request. The socket value
+  `hugging_face_token`), never in plain DataStore. It is attached by the
+  downloader from the request's own URL — `https` and host `huggingface.co`, by
+  equality — never from "a token is saved": the Hub's CDN redirect needs no token
+  (OkHttp drops `Authorization` on a host change), and a pasted URL for any other
+  host never gets it. Discovery browsing and metadata calls are anonymous.
+- **Every cloud client carries an explicit `ConnectionTimeoutConfig`** — one shared
+  value, `CloudClientTimeouts.CONFIG`, passed by `KoogClientFactory` (chat) and
+  `DefaultKoogEmbedderFactory` (embeddings), and required at every construction site
+  by `KoogClientTimeoutKonsistTest`: 60 s socket, 30 s connect, 900 s request. The socket value
   is the load-bearing one because Ktor applies it *per read* — it bounds how long
   the provider may stay **silent**, not how long a healthy answer may take, so a
   long streaming reply is never cut short for being long. Do not "simplify" this
@@ -174,7 +225,12 @@ interface Tool {
 - **Provider error text is scrubbed before it is shown, logged or stored**
   (`CloudErrorSanitizer`). Google authenticates by query parameter, so its
   transport errors arrive carrying the API key; credentials must never reach the
-  run console, the run trace or logcat.
+  run console, the run trace or logcat. An executor that calls a provider scrubs
+  its own error (`sanitize(e)`) and logs the scrubbed message, not the
+  throwable. The engine redacts again as a backstop (`redactSecrets`) — a
+  backstop, not a licence to skip the first step. The crash-reporting tree
+  sends no error text at all: an error's type and stack frames, and the
+  call site's message template (see `code-style.md` § Logging).
 - Use the unified `CLOUD` pipeline node with a `provider` parameter — do
   not add per-provider node types to the pipeline graph.
 
@@ -209,8 +265,14 @@ interface Tool {
 - Use `org.json.JSONObject` or `kotlinx.serialization` — **never** manual
   string parsing.
 - Always handle `JSONException` and map it to a typed error result.
-- When parsing tool arguments from LLM output, use the canonical parser in
-  `domain/parser/ToolArgumentParser.kt`.
+- Tool arguments from LLM output have no shared parser. The call envelope is
+  extracted by `ToolCallParser` (and by `ToolNodeExecutor` through
+  `StructuredOutputGate`), both on `JsonPayloadExtractor`; each
+  `LocalToolExecutor` then reads its own fields with `org.json`. Catch
+  `JSONException` in the executor and answer with an error, as
+  `HttpRequestExecutor` does. Most executors still let it reach
+  `ToolInvocationGate`, which hands it to the model as a failed call: the run
+  goes on and nothing executes.
 
 ---
 

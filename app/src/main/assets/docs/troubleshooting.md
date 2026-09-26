@@ -81,6 +81,11 @@ something that would fail. See [What the tool count on a server row
 means](user-guide.md#what-the-tool-count-on-a-server-row-means) — it is a real
 limitation, not a misconfiguration you can fix from the Tools screen.
 
+If the tool is listed under the server but marked *Not offered to the agent*,
+another tool has the same name — a tool on the device, or the same tool on a
+server listed above. See [When two tools share a
+name](user-guide.md#when-two-tools-share-a-name).
+
 ## The same question goes to the cloud one time and stays local the next
 
 That is usually the router reading the conversation, not a bug. See [Why
@@ -222,19 +227,22 @@ screen's search), work down this list:
 
 All local data is stored in an encrypted database whose key lives in
 Android's hardware keystore. In rare situations — typically right after
-restoring the app from a backup, after an OS update, or due to a
-transient keystore glitch — that key can become temporarily unreadable,
+an OS update, or due to a transient keystore glitch — that key can become
+temporarily unreadable,
 and the app shows a dedicated recovery screen instead of starting:
 
 - **Tap Retry first — possibly more than once.** Keystore failures are
   often transient; if the key becomes readable again, the app opens your
   existing data untouched. Rebooting the device before another retry
   helps in some cases.
-- **Erase all data is the last resort.** If retrying never gets past the
+- **Erase data is the last resort.** If retrying never gets past the
   screen, the key is gone for good and the encrypted database can no
-  longer be opened by anyone — including the app itself. **Erase all
-  data** deletes the database and generates a fresh key so you can start
-  over. The action is irreversible and guarded by a typed confirmation.
+  longer be opened by anyone — including the app itself. **Erase data**
+  deletes the database, your agent workspace files, attachments and scheduled
+  tasks, and generates a fresh key so you can start over. Settings and saved keys are
+  kept, and so are downloaded models — they are listed again under Models,
+  inactive, so pick one before chatting. The action is irreversible and
+  guarded by a typed confirmation.
 
 The app never deletes or re-keys your data automatically in this state:
 without the original key the database contents cannot be recovered, so

@@ -92,14 +92,15 @@ device.
 Open the **More** tab and tap **Models**. The screen has two areas:
 
 - A list of **presets** — curated LiteRT models that are known to work
-  with the agent. Each preset shows the model name and a **Download**
-  button (or a **Downloaded** label if it is already on the device).
-- A **Custom Model URL** field for paste-in downloads (for example, a
-  direct file URL from Hugging Face).
+  with the agent. Each preset shows the model name and a **Get** button;
+  once it is on the device, a three-dot menu with **Activate** and
+  **Delete** takes its place (the active model is marked **ACTIVE**).
+- A **Custom Model URL** field for paste-in downloads (a direct link to a
+  `.litertlm` file, for example from Hugging Face).
 
-If the source you are downloading from requires authentication, paste
-your token into the **HuggingFace Auth Token** field above the URL
-input. The field is masked and is used only for the download request.
+If the model is gated on Hugging Face, paste your access token into the
+**HuggingFace** field above the URL input. The field is masked, and the
+token is sent only with downloads from `huggingface.co`.
 
 <!-- TODO: device capture of the Models screen. The hero shots under
      `docs/images/` cover chat / pipeline-editor / pipeline-library /
@@ -109,9 +110,10 @@ input. The field is masked and is used only for the download request.
 
 ### 2. Download a model
 
-- To use a preset, tap **Download** next to it.
-- To download a custom file, paste the URL into **Custom Model URL**
-  and tap **Download Custom Model**.
+- To use a preset, tap **Get** next to it.
+- To download a custom file, paste its link into **Custom Model URL**
+  and tap **Get**. A link that does not end in a `.litertlm` file is
+  refused before anything downloads.
 
 A progress bar appears with a percentage, and a notification shows the
 same progress with a **Cancel** action. The transfer is a real background
@@ -334,8 +336,13 @@ history is portable to any app that handles JSON or plain text.
 - **Import** — open the drawer and tap **Import chat**. The system
   file picker opens, filtered to `application/json`. Selecting a
   previously exported file creates a new chat session with the
-  imported messages and switches to it immediately. Malformed files
-  surface an inline error via the chat snackbar.
+  imported messages and switches to it immediately. A chat file can
+  come from anyone, so the import keeps only the conversation — your
+  turns and the assistant's — and leaves out the app notices and tool
+  observations of the device it came from. Imported messages are never
+  read for long-term memory, never re-run by **Retry**, and never dated
+  later than the moment you imported them. A file the app cannot read is
+  refused whole, with a short reason and nothing imported.
 - **Delete chat** — from the same overflow menu choose **Delete chat**.
   A destructive confirmation dialog appears; once confirmed the
   conversation (and every message in it) is removed. The next
@@ -360,13 +367,15 @@ the app assembles a report: your note, the category, the reported text, and
 the app version, device and currently selected model. That last one is the model
 selected now, which is the one that answered unless you have switched since.
 
-Nothing is transmitted. There is no reporting server behind this app, and
-adding one would contradict everything else on this page. Instead you get
-two ways to hand the report over yourself: **Copy report** puts it on the
-clipboard, and **Open issue** opens the public issue tracker with the report
-prefilled. The tracker is public, so read the text and remove anything
-private before you submit it — the reported response is quoted in full (up
-to a length cap, which the report states when it applies).
+The app sends nothing on its own — there is no reporting server behind it,
+and adding one would contradict everything else on this page. You hand the
+report over yourself, one of two ways: **Copy report** puts it on the
+clipboard, and **Open issue** opens the public issue tracker in your browser
+with the report prefilled. The prefilled text rides in the link, so GitHub
+receives it as soon as the page opens, even if you never submit; the issue
+becomes public only when you do. The reported response is quoted in full (up
+to a length cap, which the report states when it applies) — if it holds
+something private, copy the report and edit it before you post.
 
 ### Attaching an image
 
@@ -380,7 +389,8 @@ message. A small sheet offers two sources:
 
 The chosen image is **downscaled on the device** (its aspect ratio is kept —
 never cropped to a square) and re-encoded to JPEG before it is stored; the
-original file is never copied into the app. A removable preview appears above
+original is never kept — a photo you take is deleted from the app's cache as
+soon as its smaller copy is made. A removable preview appears above
 the input row while you finish typing — tap the **✕** to drop it. You can send
 an image on its own, without any caption.
 
@@ -650,21 +660,34 @@ If the agent needs your approval to run a sensitive or destructive
 tool, the chat shifts into the **HitlConfirm** state — a card appears
 inline in the message stream with the tool name, the typed arguments,
 a colour-coded risk pill (`READ` / `SENS` / `DEST`), and **Approve** /
-**Deny** buttons. Destructive tools also require typing the literal
-tool name as a typed-confirm gate before the **Approve** button is
-enabled.
+**Deny** buttons. Destructive tools also require typing **yes** into a
+confirmation field before the **Approve** button is enabled.
+
+If that chat is not on screen when the request comes in, it also
+arrives as a notification. For read-only and sensitive tools it offers
+**Approve** and **Deny**. Destructive tools never execute from a
+notification — it offers **Deny** and a **Review in chat** link to the
+regular typed-confirm card. The same goes for a call whose arguments are
+longer than a notification can show: its text is cut with a note, and it is
+approved in the chat, where the card shows every argument.
+
+Each notification and each card answers only the request it shows. If two
+runs are waiting in the same chat, each has its own notification, and a
+button for a request that has already been answered or stopped does nothing.
 
 An unanswered request does not fail the run. When the live waiting
 window elapses — say a scheduled run hits a sensitive tool at 6 a.m. —
 the run parks in a persistent waiting state and an ongoing notification
 becomes your way back to it; swiping the notification away simply
-re-posts it. For read-only and sensitive tools, **Approve** and
-**Deny** work straight from the notification, even if the app process
-has since been killed: the run resumes from its checkpoint and the
-tool call is re-validated before your stored decision is applied.
-Destructive tools never execute from a notification — it offers
-**Deny** and a **Review in chat** link to the regular typed-confirm
-card. Clarifying questions park the same way under an **Agent needs
+re-posts it. Its buttons work even if the app process has since been
+killed: the run resumes from its checkpoint and the tool call is
+re-validated before your stored decision is applied. A **Deny** stays
+a deny even if you change **Approve tool calls** while the run waits.
+If the resumed run makes a different call — other arguments — or the
+call now carries a different risk than the one you answered, your answer
+is not applied to it and you are asked again, whatever **Approve tool
+calls** says.
+Clarifying questions park the same way under an **Agent needs
 your input** notification that deep-links back to the chat. Parked
 requests expire after the **Settings → Background & triggers → Approval window**
 period (default 24 hours); an expired run fails with *Approval window
@@ -723,7 +746,7 @@ setting once by hand.
 | Notification | When | Actions |
 |---|---|---|
 | *Agent is working* (only while working) | While a run executes in the background; auto-removed when it finishes | Opens the app |
-| *Approval required* | A sensitive/destructive tool call awaits your decision | **Approve** / **Deny** (destructive: **Deny** / **Review in chat**) |
+| *Approval required* | A sensitive/destructive tool call awaits your decision | **Approve** / **Deny** (destructive, or arguments too long to show: **Deny** / **Review in chat**) |
 | *Agent needs your input* | A clarification question is waiting | Deep-links into the chat |
 | *Task completed* / *Task failed* | A scheduled task finished | Opens the conversation the result landed in |
 | *Still running* (optional ping) | A long backgrounded run is still going | Opens the app |
@@ -769,9 +792,18 @@ The app appears in the Android share sheet for **text and images**.
 Share something and pick the app: it runs your chosen *share pipeline*
 over the shared content and opens the chat so you can watch the run.
 A shared image is attached exactly like a composer attachment (the local
-model reads it; it never leaves the device). If you have not bound a
-share pipeline yet, the app opens with a reminder instead of running
-anything.
+model reads it; it never leaves the device), and it gets the same checks
+first: if the share pipeline starts with a cloud step, the active model
+can't read images, or no on-device step would see the picture, the app
+says so and runs nothing. If you have not bound a share pipeline yet, the
+app opens with a reminder instead of running anything.
+
+**Other apps can hand content to it directly**, not only through the share
+sheet. So pick a share pipeline you are comfortable running on text you did
+not write. At most **30 shares an hour** start a run; past that the app says
+so and runs nothing until the hour moves on. The limit is one for every app,
+since the app cannot tell who sent a share. Details are in
+[SECURITY.md](../SECURITY.md#automation-triggers-and-entry-surfaces-background-execution).
 
 By default every share lands in one running **Shared** chat, so
 everything you send accumulates in one place — new shares are appended to
@@ -804,8 +836,9 @@ Another app on the device can ask Knotwork to run a pipeline for it — a
 Tasker or MacroDroid profile, or a shell script over `adb`. The other app
 decides *when*; Knotwork does the language-model part of *what*.
 
-This one is different from the three above, because it opens the app to
-code you did not write. So it is switched on deliberately, in two steps:
+This one is different from the three above: a request needs no screen, so it
+can arrive from an app in the background and run with nothing shown. So it is
+switched on deliberately, in two steps:
 
 1. **Settings → Background & triggers → External automation** — the switch
    raises a dialog spelling out what you are agreeing to: any app on the
@@ -871,7 +904,9 @@ Bind a pipeline to a surface in either place:
   Quick Settings tile pipeline (next to the filled **DEFAULT** pill).
 
 If you delete a pipeline that a surface was using, that surface simply
-turns off again until you bind another.
+turns off again until you bind another. The same holds if the bound pipeline
+is gone for any other reason — after **Erase data**, for example: a surface
+never falls back to another pipeline.
 
 ---
 
@@ -922,7 +957,8 @@ An **unbound** trigger (no pipeline) is always inert and shows "No
 pipeline — tap to bind" with a disabled switch — a trigger fires nothing
 without a pipeline. Saving, enabling, disabling or deleting a trigger
 takes effect immediately, without waiting for the next app launch. If you
-delete the bound pipeline, the trigger is disabled automatically.
+delete the bound pipeline, the trigger is switched off at once; it keeps its
+binding, so point it at another pipeline and switch it back on.
 
 ### How soon a trigger fires
 
@@ -963,7 +999,9 @@ all on the **"Scheduled task results"** channel and gated by the same
 Tapping any of them deep-links straight into the trigger's chat. If a run
 pauses for approval of a sensitive or destructive tool, you get the usual
 **approval notification** with **Approve / Deny** actions, so you can let a
-background trigger run proceed (or stop it) without opening the app.
+background trigger run proceed (or stop it) without opening the app. A
+destructive tool is the exception: its notification offers **Deny** and
+**Review in chat**, and approving it takes the typed confirmation in the chat.
 
 ### Checking what a trigger has been doing
 
@@ -1488,6 +1526,43 @@ the app's import flow, so there is no manual conversion step.
 4. The imported pipeline is saved into the library and becomes the
    one currently open in the editor.
 
+A pipeline file can come from anyone, so a few things are checked on the way
+in rather than taken as written:
+
+- **The node settings you see are the ones that run.** A file keeps each node's
+  settings twice — once for the run, once for the editor. Opening a node, in the
+  app or in the browser editor, shows the copy the run uses, whatever the editor
+  copy says. One exception: a router's classes live only in the editor copy. The
+  run chooses among the labels on the router's outgoing edges, so the canvas
+  draws a port for every one of them. The browser editor reads the file the
+  way the app does, including a node's *Input data* switches and provider
+  names in any letter case; a tool it has no entry for is shown by name and
+  kept when you save.
+- **Unclear settings are refused, not guessed.** An *Input data* switch a file
+  leaves out takes that node type's usual setting; one set to anything but on
+  or off (`true` / `false`) refuses the file, and so does a provider name the
+  app does not know.
+  Files saved by an earlier browser editor kept four settings only in the
+  editor copy; the browser editor still reads those from there and saves them
+  into both.
+- **Names stay short.** The pipeline name and each node's label are kept to one
+  line of at most 60 characters; anything longer is cut. The pipeline's id is
+  an identity other pipelines and triggers refer to, so it is not cut: a file
+  whose id is not one line of at most 128 characters is refused.
+- **Text quoted from the file stays on one line.** The settings a newer file
+  carries that this version would drop are listed one short line each.
+- **Branches are drawn where the run takes them.** An **If**, **Queue** or
+  **Evaluation** edge label is read in any letter case and saved as its port
+  spells it (`false` becomes **False**); a label that names none of the node's
+  branches refuses the file. A router edge whose label names none of the
+  router's classes gets a port of its own on the canvas, since the run can
+  choose it too.
+- **Starter prompts only name tools the pipeline calls.** The `uses · …` line
+  under a starter prompt keeps a tool only if one of the pipeline's Tool nodes
+  is set to call it, and a pipeline keeps at most six starter prompts.
+- **Files over 8 MB are not read.** That is about three times a bundle of fifty
+  of the largest bundled pipelines.
+
 ### Moving a whole composition — bundles
 
 A single **Export JSON** / **Import JSON** moves *one* pipeline. If your
@@ -1511,8 +1586,20 @@ dangling references. A **bundle** solves this: it packs the pipeline
   the same identity as one already in your library, the app asks what to
   do: **Replace** it (update in place, keeping anything bound to it) or
   **import as a copy** (leave the existing one untouched and add a fresh
-  duplicate). This choice now appears for ordinary single-pipeline
-  imports too, so an import never silently overwrites your work.
+  duplicate). This choice appears for ordinary single-pipeline imports too,
+  so an import never silently overwrites your work.
+
+  The question names the pipeline **already in your library**, not the name
+  written in the file, and lists what runs it: the default pipeline for
+  chats, the share target, the Quick Settings tile, requests from other apps,
+  automation triggers, chats, and other pipelines that call it. Replace keeps
+  all of these pointed at it, so from then on they run the file's steps. When
+  in doubt, import as a copy — it changes nothing that already works.
+
+  The same question comes up when the file carries the identity of a pipeline
+  you **deleted**: chats, triggers and pipelines that called it keep that
+  identity, so **Keep the id** would make them run the file's steps. The
+  question lists them; importing as a copy leaves them as they are.
 
 Bundles carry pipelines only — not triggers, tool/MCP settings, prompt
 presets, or chat history. Those stay on the device they were set up on.
@@ -1540,8 +1627,8 @@ file in a later build:
   format adds new fields without bumping the version, so a file written
   by a newer build can claim the same `schemaVersion` and still contain
   settings this build cannot read. That case used to be completely
-  invisible; it is now reported the same way, as a notice after the
-  import.
+  invisible; now a notice after the import says how many settings were
+  not kept. Only the version warning lists them by name.
 - **So keep the original file.** Naming the loss is not preventing it,
   and re-exporting after a lossy import overwrites the only complete copy
   you had.
@@ -1582,7 +1669,7 @@ The app ships with the following tools:
 | **edit_file**      | Makes a targeted change to an existing workspace file by replacing a unique snippet of text. The snippet must match exactly once, so an edit never lands in the wrong place. Asks for confirmation before running. |
 | **append_file**    | Adds text to the **end** of a workspace file, creating it on the first call. Existing content is always kept (there is no overwrite), so it is the natural fit for accumulating entries in a daily log or report. Asks for confirmation before running. |
 | **delete_file**    | Deletes a file from the workspace. This is irreversible and always asks you to confirm before it runs. |
-| **http_request**   | Calls a remote HTTP(S) API (GET/POST/PUT/DELETE). It can only reach domains you have explicitly added to the **Allowed domains** list — until you add one, the tool is hidden from the agent entirely. A GET asks for confirmation; a POST/PUT/DELETE asks for the stronger destructive-action confirmation. See the warning below before adding a domain. |
+| **http_request**   | Calls a remote HTTP(S) API (GET/POST/PUT/DELETE). It can only reach domains you have explicitly added to the **Allowed domains** list — until you add one, the tool is hidden from the agent entirely. A GET asks for confirmation unless **Approve tool calls** is set to `Never`; a POST/PUT/DELETE always asks for the stronger destructive-action confirmation. See the warning below before adding a domain. |
 
 Each tool has a switch on the Tools screen. Turn a tool off to hide
 it from the agent for the next run; turn it on to make it available
@@ -1665,9 +1752,9 @@ can run it on its own:
   fact).
 - **SENSITIVE** — surfaces an **Approve / Deny** prompt in the chat
   before the call happens.
-- **DESTRUCTIVE** — same approval gate as **SENSITIVE**, used for
-  actions that cannot be undone (for example, sending a message or
-  deleting data).
+- **DESTRUCTIVE** — same approval gate as **SENSITIVE**, plus a typed
+  confirmation, used for actions that cannot be undone (for example,
+  sending a message or deleting data).
 
 When approval is required, the mini-console shows inline
 **Approve** and **Deny** buttons. The agent waits for your response
@@ -1676,7 +1763,11 @@ killing the run.
 
 The **Approve tool calls** control in **Settings → Tools & workspace** lets
 you require approval for **every** tool call (`All`), regardless of its risk
-level. Choose it if you want to confirm even read-only lookups.
+level. Choose it if you want to confirm even read-only lookups. `Never` goes the
+other way: read-only and sensitive tools run without asking, but a destructive
+tool still stops for your approval under every setting. To keep destructive
+tools from running at all, turn on **Block destructive tools** — they are then
+refused instead of offered for approval.
 
 #### Changing a tool's risk level
 
@@ -1699,6 +1790,28 @@ tool name on two servers stays two separate decisions, because they are two
 different tools. A server's own hints about its tools are deliberately not
 consulted: a server that could declare itself read-only could walk straight past
 the gate.
+
+#### When two tools share a name
+
+The agent calls a tool by its name, so each name reaches exactly one tool:
+
+- **A tool on your device wins.** If a server offers a tool named like a
+  built-in one — `read_file`, say — the agent only ever gets the built-in. The
+  server's tool is not offered to it at all.
+- **Otherwise the first server wins.** If two servers offer the same name, the
+  one listed first on the Tools screen serves it, as long as the tool is
+  switched on there. Switch it off there and the next server takes over.
+
+The Tools screen says so under a server tool the agent is not offered: *Not
+offered to the agent*, and why. Switching that tool on does not help; rename or
+switch off the tool that takes the name instead.
+
+The approval prompt, the risk level and the call itself all come from that one
+server. If the call fails there, it is not retried on another server — a call
+that timed out may still be running where it was sent. And if a server comes
+back between the approval check and the call and takes the name over, the call
+is stopped and you are told to run it again, rather than run under a decision
+you made for a different server.
 
 ### Adding an MCP server
 
@@ -1759,6 +1872,21 @@ explanation — the tool needs a client feature the app does not have.
 Tools that just take arguments and return a result are unaffected, and
 that is the large majority of what MCP servers publish.
 
+The app also sets limits of its own on what a server can publish, because
+every tool's name and description goes into the model's instructions on every
+run. A tool whose name is not a plain identifier (letters, digits, `_`, `-`
+and `.`, up to 128 characters, as the MCP specification asks) is left out; a
+description longer than 4 096 characters is cut, with a note saying so; and one
+server publishes at most 256 tools and about 256 KB of tool definitions —
+anything past that is left out. Ordinary servers are nowhere near these limits:
+GitHub's MCP server, one of the largest, publishes 125 tools in about half the
+size.
+
+A tool's **result** is limited too, and so is an error message the server
+sends instead: past the **Largest tool response** setting (*Settings → Tools &
+workspace*, default 1 024 KB) it is cut, with a marker saying so. A node on the
+on-device model gets less: at most the **Single read budget** of it.
+
 #### How long a server is given to answer
 
 Two deadlines apply, and neither is adjustable:
@@ -1783,7 +1911,8 @@ queue behind it.
 | *MCP tool … did not respond within 60s* | The call hit the deadline above. The server may still be working on it; nothing was cancelled on its side. |
 | *Tool … not found across active providers* | No connected server publishes a tool by that name. Read the tool-count note above before concluding the server is broken. |
 | *MCP client is not connected; cannot execute …* | The connection dropped between planning the call and making it. This is deliberately worded differently from *not found*, because the tool does exist — trying again normally reconnects. |
-| *Tool … is disabled* | The tool exists but its switch is off on the Tools screen. |
+| *Tool … is disabled* | The tool exists but its switch is off on the Tools screen — on every server that offers it. |
+| *MCP tool … now resolves to risk level …, not the … its approval check used* | Between the approval check and the call, a server came back and took the tool's name over (see *When two tools share a name*), or the tool's risk level was changed on the Tools screen. The call was not made. Run it again: the check is repeated for the server that serves it now. |
 
 ---
 
@@ -1811,6 +1940,11 @@ a banner explains that the agent's writes are being refused until space
 is freed; delete files or raise the limit (Settings → Tools & workspace →
 Advanced → Workspace size limit) to recover.
 
+The workspace also holds at most **10,000 files and folders**, however small.
+Past that, new files are refused even while the indicator shows room; deleting
+files frees the count again. Folders are never shown on their own and never
+kept empty: deleting the last file in a folder removes the folder too.
+
 Pull down to refresh the listing.
 
 ### Previewing a file
@@ -1828,7 +1962,8 @@ From the preview sheet (or a row's overflow menu) you can:
 - **Share** — opens the system share sheet. The app stages a temporary
   copy for sharing, so the workspace directory itself is never exposed
   to other apps; the receiving app gets read access to that one copy
-  only.
+  only. The copy is deleted when you delete the file; otherwise, once it
+  is more than an hour old, by your next share or the daily clean-up.
 - **Save as…** — opens the system "create document" picker so you can
   write the file out to a location of your choice (Downloads, Drive,
   etc.).
@@ -1841,7 +1976,9 @@ Tap **Import** (the button in the quota header, the floating action
 button, or the empty-state call to action) to pick a file with the
 system file picker and copy it into the workspace for the agent to read.
 Imports are subject to the same per-file and total-size limits as the
-agent's own writes. If a file with the same name already exists, you are
+agent's own writes. A name carrying line breaks, tabs or other control
+characters is imported with `_` in their place, and a name longer than 242
+bytes (about 240 Latin letters, or half as many Cyrillic ones) is refused. If a file with the same name already exists, you are
 asked whether to **keep both** (the import is saved under a numbered
 name like `report (1).md`) or **replace** the existing file.
 
@@ -1915,6 +2052,15 @@ events, and relationships — into new memory chunks. Small talk, the
 assistant's own wording, and anything not explicitly stated are
 ignored, and a fact that closely matches one you already have is
 skipped rather than duplicated.
+
+It reads your messages and the assistant's replies — never tool results
+(a web lookup, a file the agent read, an MCP server's answer), not even when
+an **Output** node with no instruction passes one on as the reply, and never
+the messages of an imported chat, which are someone else's words whatever
+the file calls them — and no message can pass for a turn of yours, so text
+a tool fetched is not put before the extractor as something you said. Text
+you share into the app from another app is recorded as your message,
+though, so it is read as yours.
 
 Each new chunk is tagged with the fact type it represents (`fact`,
 `preference`, `project`, …) and the chat it came from, so you can tell
@@ -2050,7 +2196,20 @@ and import the file on the new one:
    - **Merge** — add the imported chunks to whatever is already there,
      skipping any with an id that already exists. Nothing is deleted.
    - **Replace all** — wipe the current memory (pinned entries included)
-     and load the file's chunks exactly. Use this for a clean transfer.
+     and load the file's chunks. Use this for a clean transfer.
+
+Two things are not taken from the file, whichever strategy you choose:
+
+- **Pins.** Every imported entry arrives unpinned. A pinned entry is
+  recalled whenever memory is read, whatever the question, so pinning stays something
+  you do entry by entry — the import dialog tells you how many entries the
+  file had pinned, and you can pin them again on the Memory screen.
+- **Dates in the future.** An entry dated later than the moment you import
+  it is dated to the import instead, so it ages like any new entry.
+
+A file holding more than 20,000 entries — the most memory can be set to keep —
+is refused whole. So is a file too large for the device to read in one go: the
+limit is a quarter of the memory the app may use, and the message names it.
 
 If the file was exported with a **different embedding provider** than the
 one the new device is using, the app shows a notice and re-computes the
@@ -2198,15 +2357,15 @@ repeated here.
 
 | Setting | What it means |
 |---|---|
-| **Approve tool calls** | Which tool calls stop and wait for your approval. Never lets them all through, destructive ones too, unless you also block those. |
+| **Approve tool calls** | Which tool calls stop and wait for your approval. Never lets read-only and sensitive ones through; destructive ones still ask. |
 | **Block destructive tools** | On, a destructive tool call is refused outright rather than offered for approval, and the run sees it as a failed call. |
 | **Block network from local model** | On, no cloud model and no Wikipedia lookup runs, memory search included. Ollama answers only at localhost or a private IP, never by name. |
 | **Manage tools / MCP servers** | *(no explanation — opens a screen that explains itself)* |
 | **Approval wait** | How long a run waits for you to approve a tool call before it parks and asks again later. It does not bound the call itself. |
 | **Largest file** | The largest single file the workspace accepts, for both writing one and reading one whole. |
 | **Workspace size limit** | How much device storage the whole workspace may hold. A write that would push past it is refused rather than trimmed. |
-| **Single read budget** | How much of a file one read may put in front of the model. The rest is cut, leaving room for the prompt and the thread. |
-| **Largest web response** | How much of a web response reaches the model. Past it the body is cut and marked, so remote text cannot flood the context. |
+| **Single read budget** | How much of one file read, or one tool result for the on-device model, reaches the model. The rest is cut, leaving room for the prompt. |
+| **Largest tool response** | How much of a web response or MCP result the app keeps. Past it the text is cut and marked. It bounds memory, not the context. |
 | **Allowed HTTP domains** | *(no explanation — opens a screen that explains itself)* |
 
 #### Background & triggers
@@ -2217,7 +2376,7 @@ repeated here.
 | **Pipeline for sharing** | Which pipeline runs when you share text or a link into the app from somewhere else. |
 | **Keep shares in one chat** | On, every share lands in one Shared chat. Off, each share opens its own, so the chat list grows with each one. |
 | **Quick Settings pipeline** | Which pipeline the Quick Settings tile runs when you tap it from the notification shade. |
-| **External automation** | Other apps on this device can start a run — Tasker, MacroDroid, adb. Off, those requests are refused. |
+| **External automation** | Other apps on this device can start a run — Tasker, MacroDroid, adb. Off, those requests are refused and nothing is sent back. |
 | **Pipeline other apps may run** | The only pipeline an outside app may start. Nothing else can be named in the request, whatever it asks for. |
 | **External request journal** | *(no explanation — opens a screen that explains itself)* |
 | **Resume max age** | How stale a parked run may be and still resume. Past it the run is dropped, because its gathered context no longer holds. |
@@ -2506,8 +2665,8 @@ Tool approval, safety guardrails, and the agent workspace / HTTP limits.
 Basic:
 
 - **Approve tool calls** — segmented control: `All` (prompt for every call),
-  `Sensitive +` (only sensitive/destructive — recommended), `Never` (no prompts;
-  reserved for known-safe pipelines).
+  `Sensitive +` (only sensitive/destructive — recommended), `Never` (only
+  destructive tools still ask; for known-safe pipelines).
 - **Block destructive tools** — when on, destructive tools are refused outright
   rather than going through the HITL prompt. Useful when the agent runs
   unattended.
@@ -2550,10 +2709,14 @@ Advanced:
   workspace. A write that would cross either is refused.
 - **Single read budget** (200 – 8 000 tokens, default 2 000) — how much of a file
   one `read_file` call may return. Anything past it is cut, with a marker, so one
-  read cannot fill the model's whole context.
-- **Largest web response** (64 – 8 192 KB, default 1 024) — how much of an
-  `http_request` response is read into the answer. Bounds how much untrusted
-  remote text a single call can put in front of the model.
+  read cannot fill the model's whole context. A node on the on-device model gets
+  every other tool result cut to the same budget too: in its *Tool Results*
+  block, when the result is the input it acts on, and when the chat history it
+  reads repeats an earlier result. A node on a cloud provider gets them whole.
+- **Largest tool response** (64 – 8 192 KB, default 1 024) — how much of an
+  `http_request` response or an MCP tool result is read into the answer. Bounds
+  how much untrusted remote text a single call can hold in memory and in the
+  chat — at the default, far more than an on-device model can read at once.
 - **Files / allowed domains** *(link)* — the `http_request` domain allowlist and
   the workspace file browser.
 
@@ -2706,11 +2869,16 @@ workspace and their size, the app version and build. **Tasks** reads
 another run, and it is the only row with a numeric badge: the running
 count. That is what keeps a badge meaning "something is running right
 now" — a stored quantity like the archived-chat count lives in the row's
-subtitle instead. A footer pill summarises the privacy state — when the
-agent has not made any outbound LLM or MCP call for a minute, the
-pill reads `on-device · no network calls in last N m`; an in-flight
-cloud call flips the indicator to `online · cloud enabled`. The
-window resets when the process is recreated.
+subtitle instead. A footer pill summarises the privacy state. It counts
+every connection the app opens itself — a cloud model or `delegate_task`,
+a network embedding model, an MCP server, `search_tool`, `http_request`,
+and Hugging Face browsing and model downloads. While one is running, and
+for a minute after, it reads `online · network call just now`; after that,
+`on-device · no network calls in last N m`, and before the first one,
+`on-device · no network calls yet`. Crash reports (the standard build,
+after you opt in) are not counted: the crash-reporting SDK sends them on
+its own, out of the app's sight. The count resets when the process is
+recreated.
 
 ## Managing local models
 
@@ -2723,13 +2891,17 @@ LLMs.
 - The **HuggingFace** section lets you paste a personal access token
   (stored encrypted, in the same Keystore-backed store as cloud API
   keys) so gated repositories can be downloaded. The `+ Paste` button
-  reads the system clipboard.
-- The **Custom model URL** field accepts a direct link to any
-  `.litertlm`, `.task`, or `.gguf` file. Tap `Get` to start
-  downloading.
+  reads the system clipboard. The token is sent only to
+  `huggingface.co`.
+- The **Custom model URL** field accepts a direct link to a
+  `.litertlm` file — the only format the on-device engine loads; a link
+  to any other file is refused before it downloads.
+  Tap `Get` to start downloading. A link to any other host is downloaded without your
+  token.
 - The **Available presets** list shows curated models, each row in
-  one of three states: `Get` (not downloaded), progress bar with
-  cancel-X (downloading), or `✓ ON DISK` (ready to activate).
+  one of four states: `Get` (not downloaded), progress bar with
+  cancel-X (downloading), a three-dot menu with `Activate` and `Delete`
+  (on disk), or `ACTIVE` with a menu holding `Delete` (the active model).
 
 ### Model performance & benchmark
 
@@ -2881,6 +3053,9 @@ of a pipeline. The node configuration sheet offers:
 - **Tool allowlist** — an indicator showing the skill's restriction
   (All tools / N tools / No tools).
 - **Inference engine** — run the skill **on-device** or in the **cloud**.
+- **Always ask before this call** — every tool call the skill makes stops for
+  your approval, whatever the tool's risk. It can only add a confirmation,
+  never remove one.
 - **Context toggles** — these start **inherited** from the skill's own
   default context; change any one and it's marked **overridden** so you
   can see at a glance where the node diverges from the skill.

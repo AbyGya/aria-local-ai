@@ -14,6 +14,7 @@ import app.knotwork.android.data.local.EncryptedDbPassphraseProvider
 import app.knotwork.android.data.local.crypto.AeadCipher
 import app.knotwork.android.data.local.crypto.KeystoreBackedPrefsStore
 import app.knotwork.android.data.local.crypto.SecretStore
+import app.knotwork.android.data.local.dao.BackgroundPromptDao
 import app.knotwork.android.data.local.dao.ChatDao
 import app.knotwork.android.data.local.dao.ChatHistorySummaryDao
 import app.knotwork.android.data.local.dao.ExternalAutomationJournalDao
@@ -31,11 +32,12 @@ import app.knotwork.android.data.local.dao.TraceStepDao
 import app.knotwork.android.data.local.dao.TriggerDao
 import app.knotwork.android.data.local.dao.TriggerJournalDao
 import app.knotwork.android.data.local.dao.UsageTelemetryDao
-import app.knotwork.android.data.network.CleartextGuardInterceptor
+import app.knotwork.android.data.network.SharedHttpClient
 import app.knotwork.android.data.services.ExternalAutomationCallbackSender
 import app.knotwork.android.data.services.WorkManagerTaskScheduler
 import app.knotwork.android.data.tools.local.AppFunctionDataCodec
 import app.knotwork.android.data.tools.local.LocalAppFunctionManager
+import app.knotwork.android.data.tools.local.SearchTool
 import app.knotwork.android.domain.services.ApprovalNotifier
 import app.knotwork.android.domain.services.CeilingNotifier
 import app.knotwork.android.domain.services.ClarificationNotifier
@@ -56,7 +58,6 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 import okhttp3.OkHttpClient
-import java.util.concurrent.TimeUnit
 import javax.inject.Singleton
 
 /**
@@ -73,9 +74,6 @@ import javax.inject.Singleton
 object AppModule {
 
     private const val USER_PREFERENCES_NAME = "agent_preferences"
-
-    /** Connect/read/write timeout for the shared OkHttp client, in seconds. */
-    private const val HTTP_TIMEOUT_SECONDS = 60L
 
     /**
      * Backing file name of the settings-secrets store. Must stay byte-identical
@@ -218,6 +216,10 @@ object AppModule {
                 AppDatabase.MIGRATION_58_59,
                 AppDatabase.MIGRATION_59_60,
                 AppDatabase.MIGRATION_60_61,
+                AppDatabase.MIGRATION_61_62,
+                AppDatabase.MIGRATION_62_63,
+                AppDatabase.MIGRATION_63_64,
+                AppDatabase.MIGRATION_64_65,
             )
             // No destructive fallback on upgrade: every version bump must supply an explicit
             // migration above so user data survives. Destructive recreation is kept only for the
@@ -335,6 +337,15 @@ object AppModule {
         database.externalAutomationJournalDao()
 
     /**
+     * Provides the [BackgroundPromptDao] from the database.
+     *
+     * @param database The app's encrypted database.
+     * @return The [BackgroundPromptDao] instance.
+     */
+    @Provides
+    fun provideBackgroundPromptDao(database: AppDatabase): BackgroundPromptDao = database.backgroundPromptDao()
+
+    /**
      * Provides the [UsageTelemetryDao] backing the privacy-preserving local
      * usage statistics (the `usage_counter` / `usage_active_day` tables).
      */
@@ -375,16 +386,14 @@ object AppModule {
      */
     @Provides
     @Singleton
-    fun provideOkHttpClient(): OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(HTTP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        .readTimeout(HTTP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        .writeTimeout(HTTP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        // The manifest permits cleartext app-wide because Android cannot express
-        // "any private-LAN address" in its network-security config; this restores
-        // the public-host half of that protection in app code, on every request,
-        // so a redirect cannot downgrade an https call mid-flight.
-        .addInterceptor(CleartextGuardInterceptor())
-        .build()
+    fun provideOkHttpClient(): OkHttpClient = SharedHttpClient.build()
+
+    /**
+     * Provides how `search_tool` opens its connection: the platform's own, in the app.
+     * The seam exists for the unit suite only (see [SearchTool.ConnectionOpener]).
+     */
+    @Provides
+    fun provideSearchConnectionOpener(): SearchTool.ConnectionOpener = SearchTool.ConnectionOpener.SYSTEM
 
     /**
      * Provides the singleton instance of LocalAppFunctionManager.

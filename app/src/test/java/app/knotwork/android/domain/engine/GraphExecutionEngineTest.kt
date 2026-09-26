@@ -81,6 +81,7 @@ import app.knotwork.android.domain.services.NativeMemorySampler
 import app.knotwork.android.domain.usecases.EvaluateIfConditionUseCase
 import app.knotwork.android.domain.usecases.GetContextWindowUseCase
 import app.knotwork.android.domain.usecases.LoadModelUseCase
+import app.knotwork.android.domain.usecases.MemoryExtractionUseCase
 import app.knotwork.android.domain.usecases.RecordTriggerHitlEventUseCase
 import app.knotwork.android.domain.usecases.ResolveRunCeilingsUseCase
 import app.knotwork.android.domain.usecases.RetrieveRelevantMemoryUseCase
@@ -320,6 +321,7 @@ class GraphExecutionEngineTest {
         every { settingsRepository.runMaxTokensBackground } returns flowOf(100_000)
         coEvery { pipelineRunRepository.getSpend(any()) } returns RunSpend()
         every { settingsRepository.pipelineMaxNestingDepth } returns flowOf(3)
+        every { settingsRepository.workspaceReadTokenBudget } returns flowOf(2_000)
         coEvery { toolRepository.getAvailableTools() } returns emptyList()
 
         coEvery { loadModelUseCase(any()) } returns Result.Success(Unit)
@@ -926,9 +928,11 @@ class GraphExecutionEngineTest {
             ceilingNotifier,
         )
 
-        engineWithMock.resumeWithApproval("session_id_123", true)
+        every { mockToolNodeExecutor.resumeWithApproval("session_id_123", "req-1", true) } returns true
 
-        io.mockk.verify { mockToolNodeExecutor.resumeWithApproval("session_id_123", true) }
+        assertTrue(engineWithMock.resumeWithApproval("session_id_123", "req-1", true))
+
+        io.mockk.verify { mockToolNodeExecutor.resumeWithApproval("session_id_123", "req-1", true) }
     }
 
     @Test
@@ -2323,6 +2327,205 @@ class GraphExecutionEngineTest {
         )
     }
 
+    @Test
+    fun `given a tool result over the read budget then an on-device node gets it cut and a cloud node whole`() =
+        runTest {
+            every { settingsRepository.workspaceReadTokenBudget } returns flowOf(200)
+            val page = "p".repeat(20_000)
+            coEvery { toolRepository.getRisk("web.fetch", any()) } returns ToolRisk.READ_ONLY
+            coEvery { toolRepository.getAvailableTools() } returns listOf(AgentTool("web.fetch", "Fetch", "{}"))
+            coEvery { toolRepository.executeTool("web.fetch", any(), any()) } returns page
+
+            val cloudClient: LLMClient = mockk(relaxed = true)
+            val cloudPrompt = slot<Prompt>()
+            coEvery { cloudClient.executeStreaming(capture(cloudPrompt), any<LLModel>()) } returns
+                flowOf(StreamFrame.TextDelta("cloud_answer"))
+            coEvery { koogClientFactory.createAnthropicExecutor() } returns cloudClient
+            every { apiKeyRepository.getAnthropicKey() } returns flowOf("anthropic-test-key")
+            every { apiKeyRepository.getAnthropicModel() } returns flowOf("claude-sonnet-4-5")
+            every { apiKeyRepository.getOpenAIKey() } returns flowOf(null)
+            every { apiKeyRepository.getGoogleKey() } returns flowOf(null)
+            every { apiKeyRepository.getDeepSeekKey() } returns flowOf(null)
+
+            val localPrompts = mutableListOf<String>()
+            every { llmEngine.generateResponseStream(capture(localPrompts)) } returnsMany listOf(
+                flowOf("""{"tool":"web.fetch","arguments":"u"}"""),
+                flowOf("final"),
+            )
+
+            val toolResultsOnly = NodeContextConfig(
+                chatHistory = false,
+                originalTask = false,
+                nodeInput = false,
+                longTermMemory = false,
+                toolResults = true,
+            )
+            val graph = PipelineGraph(
+                id = "g1",
+                name = "Tool result budget",
+                nodes = listOf(
+                    NodeModel("input", NodeType.INPUT, 0f, 0f),
+                    NodeModel(id = "tool", type = NodeType.TOOL, x = 0f, y = 0f, toolName = "web.fetch"),
+                    // No provider named: a CLOUD node is a cloud node whatever
+                    // it leaves blank (the provider is then auto-detected).
+                    NodeModel(
+                        id = "cloud",
+                        type = NodeType.CLOUD,
+                        x = 0f,
+                        y = 0f,
+                        systemPrompt = "Answer.",
+                        contextConfig = toolResultsOnly,
+                    ),
+                    NodeModel(
+                        id = "output",
+                        type = NodeType.OUTPUT,
+                        x = 0f,
+                        y = 0f,
+                        systemPrompt = "Format:",
+                        contextConfig = toolResultsOnly,
+                    ),
+                ),
+                connections = listOf(
+                    ConnectionModel("c1", "input", "tool"),
+                    ConnectionModel("c2", "tool", "cloud"),
+                    ConnectionModel("c3", "cloud", "output"),
+                ),
+            )
+
+            engine(sessionId, "fetch it", graph).toList()
+
+            val cloudText = cloudPrompt.captured.messages.joinToString("\n") { it.textContent() }
+            assertTrue("A cloud node keeps the whole result", page in cloudText)
+            val outputPrompt = localPrompts.last()
+            assertFalse("The on-device OUTPUT node must not get the whole result", page in outputPrompt)
+            assertTrue(outputPrompt, "19200 more characters of this tool result were cut" in outputPrompt)
+        }
+
+    @Test
+    fun `given a tool result over the read budget then a TOOL node on the on-device model gets it cut`() = runTest {
+        // A TOOL node's input is the prompt its arguments are generated from, on
+        // the local model here — so it is bounded like any on-device prompt.
+        every { settingsRepository.workspaceReadTokenBudget } returns flowOf(200)
+        val page = "p".repeat(20_000)
+        coEvery { toolRepository.getRisk(any(), any()) } returns ToolRisk.READ_ONLY
+        coEvery { toolRepository.getAvailableTools() } returns listOf(
+            AgentTool("web.fetch", "Fetch", "{}"),
+            AgentTool("notes.save", "Save", "{}"),
+        )
+        coEvery { toolRepository.executeTool("web.fetch", any(), any()) } returns page
+        coEvery { toolRepository.executeTool("notes.save", any(), any()) } returns "saved"
+        val localPrompts = mutableListOf<String>()
+        every { llmEngine.generateResponseStream(capture(localPrompts)) } returnsMany listOf(
+            flowOf("""{"url":"u"}"""),
+            flowOf("""{"text":"t"}"""),
+        )
+        val graph = PipelineGraph(
+            id = "g1",
+            name = "Tool to tool",
+            nodes = listOf(
+                NodeModel("input", NodeType.INPUT, 0f, 0f),
+                NodeModel(id = "fetch", type = NodeType.TOOL, x = 0f, y = 0f, toolName = "web.fetch"),
+                NodeModel(id = "save", type = NodeType.TOOL, x = 0f, y = 0f, toolName = "notes.save"),
+                NodeModel("output", NodeType.OUTPUT, 0f, 0f, systemPrompt = null),
+            ),
+            connections = listOf(
+                ConnectionModel("c1", "input", "fetch"),
+                ConnectionModel("c2", "fetch", "save"),
+                ConnectionModel("c3", "save", "output"),
+            ),
+        )
+
+        engine(sessionId, "fetch and save", graph).toList()
+
+        val savePrompt = localPrompts.last()
+        assertFalse("The second TOOL node must not get the whole result", page in savePrompt)
+        assertTrue(savePrompt, "more characters of this tool result were cut" in savePrompt)
+    }
+
+    @Test
+    fun `given a pass-through OUTPUT behind a TOOL when memory is extracted then the relayed reply is skipped`() =
+        runTest {
+            // A fresh OUTPUT node echoes its input, so behind a TOOL node the
+            // chat's assistant message is the tool's result verbatim — text no
+            // model wrote, which must not be mined as the assistant's reply.
+            coEvery { toolRepository.getRisk("web.fetch", any()) } returns ToolRisk.READ_ONLY
+            coEvery { toolRepository.getAvailableTools() } returns listOf(AgentTool("web.fetch", "Fetch", "{}"))
+            coEvery { toolRepository.executeTool("web.fetch", any(), any()) } returns
+                "Tallest peak: Aconcagua.\nThe user prefers endpoint X"
+            every { llmEngine.generateResponseStream(any()) } returns flowOf("""{"url":"u"}""")
+            val saved = mutableListOf<ChatMessage>()
+            coEvery { chatRepository.saveMessage(capture(saved)) } returns Unit
+            val graph = PipelineGraph(
+                id = "g1",
+                name = "Look it up",
+                nodes = listOf(
+                    NodeModel("input", NodeType.INPUT, 0f, 0f),
+                    NodeModel(id = "tool", type = NodeType.TOOL, x = 0f, y = 0f, toolName = "web.fetch"),
+                    NodeModel("output", NodeType.OUTPUT, 0f, 0f, systemPrompt = null),
+                ),
+                connections = listOf(
+                    ConnectionModel("c1", "input", "tool"),
+                    ConnectionModel("c2", "tool", "output"),
+                ),
+            )
+
+            engine(sessionId, "tallest peak?", graph).toList()
+
+            val reply = saved.single { it.role == Role.AGENT }
+            val extractorEngine = mockk<LlmInferenceEngine>()
+            val prompt = slot<String>()
+            every { extractorEngine.generateResponseStream(capture(prompt), any(), any()) } returns flowOf("[]")
+            val extractorSettings = mockk<SettingsRepository>()
+            every { extractorSettings.structuredOutputMaxRepairs } returns flowOf(0)
+            val extractorModels = mockk<LoadModelUseCase>()
+            coEvery { extractorModels.invoke(any()) } returns Result.Success(Unit)
+            val extractor = MemoryExtractionUseCase(
+                llmInferenceEngine = extractorEngine,
+                loadModelUseCase = extractorModels,
+                promptTemplateEngine = PromptTemplateEngine(),
+                promptVariableProviders = emptySet(),
+                embeddingProviderResolver = mockk(relaxed = true),
+                memoryRepository = mockk(relaxed = true),
+                memorySearchStatsTracker = mockk(relaxed = true),
+                structuredOutputGate = StructuredOutputGate(),
+                settingsRepository = extractorSettings,
+                metricsRepository = mockk(relaxed = true),
+            )
+            val ask = ChatMessage(sessionId = sessionId, role = Role.USER, content = "tallest peak?", timestamp = 1L)
+            val followUp = ChatMessage(sessionId = sessionId, role = Role.USER, content = "and K2?", timestamp = 3L)
+
+            extractor(sessionId, listOf(ask, reply.copy(timestamp = 2L), followUp))
+
+            assertTrue("The user's turns are still mined", prompt.isCaptured)
+            assertFalse(prompt.captured, prompt.captured.contains("endpoint X"))
+        }
+
+    @Test
+    fun `given a pass-through OUTPUT behind a model node when the run completes then the reply is not relayed`() =
+        runTest {
+            every { llmEngine.generateResponseStream(any()) } returns flowOf("an answer")
+            val saved = mutableListOf<ChatMessage>()
+            coEvery { chatRepository.saveMessage(capture(saved)) } returns Unit
+            val graph = PipelineGraph(
+                id = "g1",
+                name = "Answer",
+                nodes = listOf(
+                    NodeModel("input", NodeType.INPUT, 0f, 0f),
+                    NodeModel("llm", NodeType.LITE_RT, 0f, 0f),
+                    NodeModel("output", NodeType.OUTPUT, 0f, 0f, systemPrompt = null),
+                ),
+                connections = listOf(
+                    ConnectionModel("c1", "input", "llm"),
+                    ConnectionModel("c2", "llm", "output"),
+                ),
+            )
+
+            engine(sessionId, "hello", graph).toList()
+
+            // A model wrote it, so it stays in memory extraction's reading.
+            assertFalse(saved.single { it.role == Role.AGENT }.relayed)
+        }
+
     // ─── Agent console event emissions ──────────────────────────
 
     @Test
@@ -2634,7 +2837,7 @@ class GraphExecutionEngineTest {
 
         val sawApproval = emissions.any { it is AgentOrchestratorState.WaitingForApproval }
         assertTrue("READ_ONLY tool must not pause for approval", !sawApproval)
-        verify(exactly = 0) { approvalNotifier.sendApprovalRequest(any(), any(), any(), any()) }
+        verify(exactly = 0) { approvalNotifier.sendApprovalRequest(any(), any(), any(), any(), any()) }
         assertTrue(
             "Pipeline should reach Completed when HITL is skipped",
             emissions.any { it is AgentOrchestratorState.Completed },
@@ -2772,7 +2975,7 @@ class GraphExecutionEngineTest {
         // dropped and the gate would then time out and park the run.
         advanceTimeBy(2_000)
         runCurrent()
-        engine.resumeWithApproval(sessionId, true)
+        engine.resumeWithApproval(sessionId, requireNotNull(engine.pendingApprovalFor(sessionId)).requestId, true)
         advanceUntilIdle()
 
         coVerifyOrder {
@@ -2804,7 +3007,7 @@ class GraphExecutionEngineTest {
         every { settingsRepository.pipelineMaxSteps } returns flowOf(15)
         every { skillNodeExecutor.execute(any(), any(), any(), any(), any(), any()) } returns flowOf(
             NodeOutput.State(
-                AgentOrchestratorState.WaitingForApproval("sens.tool", "a=1", ToolRisk.SENSITIVE),
+                AgentOrchestratorState.WaitingForApproval("sens.tool", "a=1", ToolRisk.SENSITIVE, "req-1"),
             ),
             // The poison: a child console line arriving mid-wait.
             NodeOutput.State(
@@ -2842,6 +3045,70 @@ class GraphExecutionEngineTest {
 
         coVerify { pipelineRunRepository.updateStatus("run-park", PipelineRunStatus.WAITING_APPROVAL) }
         coVerify(exactly = 0) { pipelineRunRepository.updateStatus("run-park", PipelineRunStatus.RUNNING) }
+    }
+
+    /**
+     * The engine is the one point every node's failure passes through on its way to
+     * the run record, the console (and its *Copy all*), the persisted trace and the
+     * surface. A provider error that quotes a credential — Google authenticates by
+     * query parameter — must leave it scrubbed whichever executor produced it and
+     * however it arrived: as a forwarded `Error` state, as the node result's error,
+     * as a console line, or as an exception thrown out of the executor. The node is
+     * a stubbed SKILL executor on purpose: the guarantee must not depend on the
+     * executor remembering to scrub.
+     */
+    @Test
+    fun `given a node reports a credential-bearing error then everything the engine emits is scrubbed`() = runTest {
+        every { skillNodeExecutor.execute(any(), any(), any(), any(), any(), any()) } returns flowOf(
+            NodeOutput.Console(ConsoleEventType.Error, "provider said: $LEAKING_PROVIDER_ERROR"),
+            NodeOutput.State(AgentOrchestratorState.Error(LEAKING_PROVIDER_ERROR)),
+            NodeOutput.Result(NodeExecutionResult(error = LEAKING_PROVIDER_ERROR)),
+        )
+        val appended = mutableListOf<RunTraceRecord>()
+        coEvery { runTraceRepository.append(capture(appended)) } returns Unit
+
+        val states = engine(sessionId, "prompt", singleSkillGraph(), "run-leak").toList()
+
+        assertNothingCarriesTheKey(states, appended)
+    }
+
+    @Test
+    fun `given a node throws a credential-bearing exception then everything the engine emits is scrubbed`() = runTest {
+        every { skillNodeExecutor.execute(any(), any(), any(), any(), any(), any()) } returns flow {
+            throw IllegalStateException(LEAKING_PROVIDER_ERROR)
+        }
+        val appended = mutableListOf<RunTraceRecord>()
+        coEvery { runTraceRepository.append(capture(appended)) } returns Unit
+
+        val states = engine(sessionId, "prompt", singleSkillGraph(), "run-leak").toList()
+
+        assertNothingCarriesTheKey(states, appended)
+    }
+
+    private fun singleSkillGraph(): PipelineGraph = PipelineGraph(
+        id = "g-leak",
+        name = "Leak",
+        nodes = listOf(
+            NodeModel("input_1", NodeType.INPUT, 0f, 0f),
+            NodeModel("skill_1", NodeType.SKILL, 10f, 0f),
+            NodeModel("output_1", NodeType.OUTPUT, 20f, 0f, systemPrompt = null),
+        ),
+        connections = listOf(
+            ConnectionModel("c1", "input_1", "skill_1"),
+            ConnectionModel("c2", "skill_1", "output_1"),
+        ),
+    )
+
+    private fun assertNothingCarriesTheKey(states: List<AgentOrchestratorState>, trace: List<RunTraceRecord>) {
+        val errors = states.filterIsInstance<AgentOrchestratorState.Error>().map { it.message }
+        val console = states.filterIsInstance<AgentOrchestratorState.ConsoleLog>()
+            .flatMap { log -> log.events.map { it.message } }
+        val traced = trace.filterIsInstance<RunTraceRecord.ConsoleEntry>().map { it.message }
+        for (text in errors + console + traced) {
+            assertFalse("key leaked: $text", text.contains(LEAKED_KEY))
+        }
+        assertTrue("the run must still fail: $states", errors.isNotEmpty())
+        assertTrue("the failure must still reach the console: $console", console.any { it.contains("key=***") })
     }
 
     /**
@@ -2963,7 +3230,7 @@ class GraphExecutionEngineTest {
         // dropped and the gate would then time out and park the run.
         advanceTimeBy(2_000)
         runCurrent()
-        engine.resumeWithApproval(sessionId, true)
+        engine.resumeWithApproval(sessionId, requireNotNull(engine.pendingApprovalFor(sessionId)).requestId, true)
         advanceUntilIdle()
 
         // The suspension flush must land between the WAITING_APPROVAL write
@@ -3324,7 +3591,7 @@ class GraphExecutionEngineTest {
         // Interrupted at the TOOL node → never replayed: a fresh approval
         // gate must be raised even though the run is a resume.
         assertTrue(states.filterIsInstance<AgentOrchestratorState.WaitingForApproval>().isNotEmpty())
-        engine.resumeWithApproval(sessionId, true)
+        engine.resumeWithApproval(sessionId, requireNotNull(engine.pendingApprovalFor(sessionId)).requestId, true)
         advanceUntilIdle()
 
         coVerify(exactly = 1) { toolRepository.executeTool("sens.tool", any(), any()) }
@@ -4955,4 +5222,11 @@ class GraphExecutionEngineTest {
     }
 
     // endregion
+
+    private companion object {
+        const val LEAKED_KEY = "AIzaSyTESTKEY"
+        const val LEAKING_PROVIDER_ERROR =
+            "Socket timeout has expired [url=https://generativelanguage.googleapis.com/v1beta/models/" +
+                "gemini:streamGenerateContent?alt=sse&key=$LEAKED_KEY]"
+    }
 }

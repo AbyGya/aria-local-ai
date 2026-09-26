@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -31,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -61,6 +63,8 @@ private val SkeletonRowHeight = 64.dp
  * @param state immutable view state.
  * @param callbacks user-action sink.
  * @param modifier optional layout modifier.
+ * @param snackbarHost Where the screen's snackbars render: the Scaffold places it above its
+ *   bottom bar and floating action button. The app passes a `KnotworkSnackbarHost`.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,8 +72,10 @@ fun DiscoverDetailContent(
     state: DiscoverDetailViewState,
     modifier: Modifier = Modifier,
     callbacks: DiscoverDetailCallbacks = noopDiscoverDetailCallbacks(),
+    snackbarHost: @Composable () -> Unit = {},
 ) {
     Scaffold(
+        snackbarHost = snackbarHost,
         modifier = modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
@@ -209,6 +215,9 @@ private fun GatedNotice(state: DiscoverDetailViewState, callbacks: DiscoverDetai
             } else {
                 PasswordVisualTransformation()
             },
+            // A password to the keyboard even while revealed: the eye changes what
+            // is drawn, the input type is what keeps the token out of suggestions.
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
             monospace = true,
             contentDescription = stringResource(R.string.knotwork_discover_token_placeholder),
         )

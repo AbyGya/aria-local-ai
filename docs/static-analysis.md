@@ -44,17 +44,19 @@ means a document is being generated from a rule nobody is checking.
 | `:app:verifyNoOrphanedKdoc` + `:catalog:verifyNoOrphanedKdoc` | Fails if a KDoc block documents no declaration — and so silently leaves the one below it undocumented (see below). |
 | `:app:verifyDialogInventory`                  | Fails if a dialog or sheet is composed in `:app` without a recorded reason, putting it out of reach of the design-system baselines (see below). |
 | `:app:checkNoInternalFqn`                     | Custom rule: forbid `app.knotwork.android.*` FQN references in code body (see below). |
-| `:app:verifyBrowserEditorConstants`           | Fails if `pipeline-editor.html` `AUTO-GEN` blocks drift from the domain sources and the bundled presets / prompt templates, or if its node forms offer a control for a field no run reads (see below). |
+| `:app:verifyBrowserEditorConstants`           | Fails if `pipeline-editor.html` `AUTO-GEN` blocks drift from the domain sources and the bundled presets / prompt templates, if its node forms offer a control for a field no run reads, or if its export leaves out a run-time field it derives (see below). |
 | `:app:verifyDocsHygiene`                      | Custom rule: guard the public docs against LLM tool-call artifacts and internal-document references (see below). |
 | `:app:verifyExternalAutomationDocs`           | Fails if the `docs/external-automation.md` `AUTO-GEN` tables drift from the contract sources (see below). |
 | `:app:verifySettingsHelpDocs`                 | Fails if the settings reference table in `docs/user-guide.md` drifts from the shipped help strings (see below). |
 | `:app:verifyCookbookDocs`                     | Fails if the node reference in `docs/cookbook.md` drifts from the node sources (see below). |
 | `:app:verifyFileMap`                          | Fails if a generated `FILE_MAP.md` drifts from the Kotlin sources, or an undocumented-file count grows past its ratchet (see below). |
-| `:app:verifyDocLinks`                         | Fails if a relative link or an `#anchor` anywhere in the documentation leads nowhere (see below). External `http` links are reported, not gated. |
+| `:app:verifyDocLinks`                         | Fails if a relative link, an `#anchor` or an inline-code repository path anywhere in the documentation leads nowhere (see below). External `http` links are reported, not gated. |
 | `:app:verifyMermaidDiagrams`                  | Fails if an embedded Mermaid diagram is structurally broken (see below). |
 | `:app:verifyBundledDocs`                      | Fails if a document bundled into the app drifted from `docs/`, carries something the in-app renderer cannot show, or holds a link that would not resolve offline (see below). |
 | `:app:verifyDocumentationLinks`               | Fails if the app's registry of documentation links drifts from its build-side list, names a document or heading that does not resolve, or points at a heading that is not unique (see below). |
 | `:app:verifyVersionSources`                   | Fails if any hand-written copy of the version — README badge and prose, the CHANGELOG heading and links, `SECURITY.md`, the roadmap's release line — disagrees with the declared `versionName` (see below). |
+| `:app:verifySupplyChainPins`                  | Fails if a GitHub Action is referenced by anything but a full commit SHA with a version comment, the Gradle wrapper loses its distribution checksum, or dependency verification is switched off, holds an ignored key, or trusts a non-organisation key across a namespace (see below). |
+| `:app:verifyFullReleaseMergedManifest` + `:app:verifyFossReleaseMergedManifest` | Fails if a shipping variant's merged manifest gains or loses a permission, an exported component or a `queries` entry its committed expectation does not list, or declares anything the expectation forbids with an `absent` line — for `foss`, any Firebase, Play-services or data-transport element (see below). |
 | `:app:testFullDebugUnitTest` (`CookbookRuntimeReachTest`, `CookbookRecipeValidationTest`) | Fails if the cookbook's run-time verdicts disagree with `NodeConfigCodec`, or a published recipe no longer imports (see below). |
 | `:app:testFullDebugUnitTest` (`SettingsHelpCatalogTest`) | Fails if a registered setting has no help decision, or its text is blank, over-long, duplicated or in a forbidden register (see below). |
 | `:app:verifyLintBaselineOverrides`            | Custom rule: fail if a lint baseline suppresses a check demoted to informational severity (see below). |
@@ -389,7 +391,17 @@ flag them with spurious, environment-dependent violations.
 | `UsageTelemetryNoNetworkKonsistTest` | No file on the local usage-telemetry path imports a network client. The statistics stay on-device. |
 | `PromptPackNoNetworkKonsistTest`   | No file on the prompt-pack path imports a network client — a pack is imported from a file the user picked, never fetched (see below). |
 | `JournalExportNoNetworkKonsistTest` | No file on the journal-export path imports a network client — the trigger and external-request journals leave the device only through the share sheet or a file the user picked (see below). |
-| `NetworkEgressInventoryKonsistTest` | Every file that imports a network client is named in an inventory, with either the `PRIVACY.md` section describing what leaves the device along it or the reason it opens nothing (see below). |
+| `NetworkEgressInventoryKonsistTest` | Every shipping file (every production source set of `app` and `:catalog`) that imports a network client is named in an inventory, with either the `PRIVACY.md` section describing what leaves the device along it or the reason it opens nothing — and, for an egress, what the More tab's privacy indicator sees of it (see below). |
+| `KoogClientTimeoutKonsistTest`     | Every construction of a Koog model client passes the shared deadlines (`CloudClientTimeouts.CONFIG`); without them Koog's 900 s request and socket defaults apply, which the embedding clients once did. |
+| `ContentUriReadInventoryTest`      | Every file that opens a URI through `ContentResolver` is inventoried with where the URI comes from; one another app can supply must pass `ForeignContentUri` (another app's `content://` only), since the read runs with this app's identity. |
+| `ImageAttachmentEntryCensusTest`   | Every file that starts runs says whether it can attach an image; one that can must call the multimodal pre-flight (`CheckImageAttachmentUseCase`), and one listed as text-only may not handle an attachment. |
+| `TransientCacheDirectoryGuardTest` | Every directory the app creates under its cache, and every `<cache-path>` the `FileProvider` serves, is an entry of `TransientCacheDirectory` — so the daily sweep removes what its owner misses. |
+| `PathContainmentGuardTest`         | No production file outside `PathContainment` prefix-tests a path string: `absolutePath.startsWith(root)` passes `root/../elsewhere`, so containment is always canonicalise-then-compare. |
+| `PersistentStorageInventoryGuardTest` | Every storage root the production code reaches is inventoried with two decisions — kept out of Android backup and device transfer, and erased or kept by the recovery wipe. Backup is off, both extraction sections exclude every domain, the plain-text directories are also excluded by the names production code uses, and the wipe calls the owner of every root recorded as erased. |
+| `ExportedComponentInventoryTest`   | Every component a source manifest exports (overlays included) is inventoried with the permission it demands; each shipping one that demands none is named in `SECURITY.md`, and the external-automation receiver keeps `enforceIntentFilter`. The manifests outside `src/main` are declared test inputs — without that, an export added to `src/full` left the `foss` suite green from a cached run (observed). |
+| `OutboundBroadcastCensusTest`      | `ExternalAutomationCallbackSender` is the app's only `sendBroadcast`, so the two rules it enforces — nothing while external automation is off, nothing over the contract's length ceilings — have no second path around them. |
+| `EntrySurfaceLimitsDocumentsTest`  | Every number the public documents quote about the entry surfaces' limits (share ceiling, contract value ceilings, journal value bound) equals the constant that enforces it. |
+| `RunRateCeilingTest` (census)      | Every `RunOrigin` is bounded by its own `RunRateCeiling` or exempt for a written reason, and the two origins another app can start without a permission (`SHARE`, `EXTERNAL`) have a ceiling. A new origin does not compile until someone decides. |
 | `TabRootEntryGuardTest`            | A bottom-nav tab root is entered as a tab switch, never pushed onto another subtree's back stack. |
 | `InstrumentedTestExclusionGuardTest` | The roster of device-only instrumented tests, and the annotation the emulator workflow excludes by, stay in step. |
 
@@ -439,15 +451,32 @@ third round was the built-in `search_tool`, reaching `wikipedia.org` since
 before the first public release while four documents said the paths were five
 and each one user-configured.
 
-`NetworkEgressInventoryKonsistTest` inverts the shape. Any file in `app/src/main`
-whose **imports** include a network client (the same five prefixes the deny-lists
-use) must appear in a hand-written inventory carrying a verdict: `Opens`, naming
-the `PRIVACY.md` subsection that describes what goes out along it, or `None`,
-with the reason it starts no request — a URL builder, a model descriptor, an
-interceptor on somebody else's client. A named section has to exist, and an entry
-naming no such file fails too, so the inventory cannot rot in either direction.
-Selection is by import rather than by name, which is what keeps it clear of the
-trap the three deny-lists share.
+`NetworkEgressInventoryKonsistTest` inverts the shape. Any shipping file — every
+production source set of `app` (`main`, the flavours, `debug`) and of `:catalog` —
+whose **imports** include a network client must appear in a hand-written inventory
+carrying a verdict: `Opens`, naming the `PRIVACY.md` subsection that describes what
+goes out along it, or `None`, with the reason it starts no request — a URL builder,
+a model descriptor, an interceptor on somebody else's client. A named section has
+to exist, and an entry naming no such file fails too, so the inventory cannot rot
+in either direction. Selection is by import rather than by name, which is what
+keeps it clear of the trap the three deny-lists share.
+
+The import prefixes live in one list, `NetworkClientImports`, which all four rules
+read. They used to be four copies of five prefixes, and a namespace missing from one
+was missing from all: the image loader (`coil3.`), the Firebase SDK and
+`android.webkit.` were. So was a whole source set — scoped to `app/src/main`, the
+inventory had no entry for the Crashlytics upload in `app/src/full`. Coil in
+`:catalog` is inventoried as opening nothing, and that verdict rests on a fact the
+rule checks rather than assumes: Coil 3 fetches over the network only through a
+fetcher a `coil-network-*` artifact registers with `ServiceLoader`, and the rule
+asserts that registry is empty.
+
+Each egress entry also says what the More tab's privacy indicator
+(`NetworkActivityTracker`) learns of it: the file records the call itself, named
+callers record it, or it is not shown and the entry says why. The first two are
+checked against the code (`recordOutbound(` outside comments). The indicator reads
+"no network calls", and it once heard of three of the ten paths it counts now; a new egress
+now fails here until somebody decides what the indicator says about it.
 
 What it does **not** do is check that the named section describes the path
 *truthfully*; no assertion can, because the truth of that prose is a claim about
@@ -455,7 +484,10 @@ code somewhere else. It removes the failure mode that actually occurred — a pa
 reaching the network with no entry anywhere, which nobody had to notice. It was
 observed red twice before it was believed: once with `SearchTool.kt` dropped from
 the inventory (the message names the file), and once against the privacy policy
-as it shipped in `0.10.0`, which the rule refuses. The privacy policy is already
+as it shipped in `0.10.0`, which the rule refuses. The wider scope and the
+indicator column were observed red the same way: with the Crashlytics entry
+removed, with every added `recordOutbound()` call removed, and with a bogus
+fetcher registered for Coil. The privacy policy is already
 a declared `Test` input of the module, so an edit to it re-runs the rule instead
 of answering from cache — checked by running twice for `UP-TO-DATE`, editing, and
 watching the task execute.
@@ -1069,8 +1101,26 @@ about *this repository*: its verdict is a function of the commit under review
 and nothing else, so a dead one is a defect the build can refuse. It resolves
 every internal link across the whole Markdown set — the top-level documents,
 `docs/`, `.github/`, the `FILE_MAP.md` family and `gradle/` — and fails naming
-the file, the line and the target. Today that is more than 400 internal links
+the file, the line and the target. Today that is more than 450 internal links
 across 35 Markdown files.
+
+**It reads inline-code paths too.** Documentation names source files in code
+spans far more often than in links, and a span is invisible to a link checker —
+which is how a rule in `api-conventions.md` sent implementers to a parser file
+that had never existed, for four months, with this gate green. So a span written
+as a repository path is resolved as well: it must hold a `/`, end in a source
+extension (`.kt`, `.md`, `.yml`, …) after an optional `:line` or `#anchor`, and
+begin with `./`, `../` or a directory name that exists in the repository. It
+resolves from the root, from the document's directory, or as the tail of a file's
+path (`data/mcp/KoogMcpClient.kt`, written from the package root). Shorthand is
+left alone on purpose — an elision (`…`, `...`), a glob, a `<placeholder>`, build
+output, an absolute (device) path — and so are the spans of `CHANGELOG.md`,
+whose entries name the tree they were written against. The file index is a walk
+of the working tree, not the Git index, minus build output and the Git-ignored
+entries that exist only in a developer's checkout (internal notes, local agent
+rules, `local.properties`), so a local pass means a CI pass. Today that is about 220
+spans. A span that is deliberately not one file is written elided, or as the
+bare file name.
 
 **`:app:reportExternalDocLinks` is a report, and is not part of `check`.** An
 `http` link is a claim about somebody else's server; it can turn red while the
@@ -1114,7 +1164,10 @@ same corpus locally and in CI.
 Shortcut and collapsed reference usages (`[label]`, `[label][]`) are not
 resolved — `CHANGELOG.md` is full of them, and they are covered only in as much
 as their *definitions* are checked. A code span opened on one line and closed on
-the next keeps its links visible to the scanner. Anchors into a Markdown file
+the next keeps its links visible to the scanner, and its path is not read. A
+span naming a class, a package or a directory (no file extension) is not
+resolved: `data/tools/local/appfunctions/AgentAppFunctionService` names nothing
+the file system can answer for. Anchors into a Markdown file
 outside the scanned set are reported rather than skipped: that would mean the
 scan has a hole, which is a finding about the gate itself.
 
@@ -1133,8 +1186,12 @@ every time is the honest option, and it costs a fraction of a second.
 Watched red before being trusted, in three shapes: a link to a file that does
 not exist, a link to an anchor that does not exist, and both together **inside a
 brand-new untracked file** — the case the Git-index failure mode above would
-have missed. The pure logic is unit-tested in `buildSrc` (`MarkdownLinksTest`,
-`DocLinkCheckerTest`, `ExternalLinkReportTest`).
+have missed. The inline-code pass was watched red on the real tree before any
+document was touched — six spans, two of them dead references nobody had
+reported (the parser above, and a settings screen that had since been split) —
+and on a probe span naming a brand-new untracked file, which resolved once the
+file existed. The pure logic is unit-tested in `buildSrc` (`MarkdownLinksTest`,
+`DocLinkCheckerTest`, `RepositoryFilesTest`, `ExternalLinkReportTest`).
 
 ---
 
@@ -1684,17 +1741,29 @@ fields stay in the editor's encode/decode, so files still round-trip. The guard
 refuses to pass when `renderFormFields` or a node type's `case` cannot be found,
 so a rename cannot make it check nothing.
 
+**The third half: everything derived for the run is exported.** The editor
+derives the flat values the engine reads in `richToFlat`, and `exportToJson`
+writes the file's `config` block from its own list of keys.
+`BrowserEditorFlatExportGuard` fails when a key `richToFlat` sets is missing from
+that list. The app's node sheet shows the `config` copy — the one that runs — so
+a derived field left out of the export is a browser setting that is silently
+gone after import. It refuses to pass when either function or the `config` block
+cannot be found.
+
 To fix a failure, run `./gradlew :app:generateBrowserEditorConstants` and commit
 the updated `pipeline-editor.html`; for the inert-control half, remove the
-control and its validation from the form.
+control and its validation from the form; for the export half, add the key to
+the `config` block in `exportToJson`.
 
 ### Observed failing
 
 The inert-control guard's first run named **eight** controls — temperature,
 top-p, max new tokens and stop sequences on the on-device node; model,
 temperature, max tokens and timeout on the cloud node — against the seven the
-defect report had counted. The pure logic is unit-tested in `buildSrc`
-(`BrowserEditorConstantsGeneratorTest`, `BrowserEditorInertControlGuardTest`).
+defect report had counted. The export guard's first run named **three** —
+`fallbackClass`, `maxSubtasks` and `quickReplies`. The pure logic is unit-tested
+in `buildSrc` (`BrowserEditorConstantsGeneratorTest`,
+`BrowserEditorInertControlGuardTest`, `BrowserEditorFlatExportGuardTest`).
 
 ---
 
@@ -1753,6 +1822,354 @@ fixture, an obfuscated one, an absent-package one, and a member-line shape
 that must not be misparsed as a class. Protected packages are listed in
 `r8ProtectedPackages` in `app/build.gradle.kts`; add to that list whenever a
 new keep rule exists to satisfy a stack-walking or name-reflecting library.
+
+### Keep-rule names (`verify<Variant>KeepRuleTargets`)
+
+The mapping guard proves a rule that matched kept doing so. It cannot see a rule
+that never matched anything, and R8 does not report one — no warning, no info
+line. `:app:verify<Variant>KeepRuleTargets` runs **before** R8 on every release
+build and resolves each class, annotation and package named in a class
+specification of `app/proguard-rules.pro` against the classes R8 is about to read:
+the variant's `ScopedArtifact.CLASSES` over every scope, plus the SDK boot
+classpath. `*` and `?` stay within a package segment and `**` crosses them, as in
+ProGuard's syntax; names without a package (`*`, `**$$serializer`) match by
+construction. `-dontwarn` / `-dontnote` are not checked — naming absent classes is
+what they are for. The parser and matcher are
+[`KeepRuleTargets`](../buildSrc/src/main/kotlin/app/knotwork/android/buildtools/KeepRuleTargets.kt),
+unit-tested in `buildSrc`; the task refuses to pass when it finds no names or no
+classes.
+
+**Observed failing.** On the tree it was written for, five names: four
+AppFunctions rules naming `androidx.appfunctions.AppFunctionInventory`,
+`…AppFunctionInvoker` and `@androidx.appfunctions.AppFunction` (the library ships
+them under `…internal`, `…service.internal` and `…service`), and
+`org.tensorflow.lite.**`, a package no dependency has. Every other name in the
+file resolved.
+
+### Pinned NDK (`verify<Variant>PinnedNdk`)
+
+The app packages five prebuilt native libraries, and AGP strips them with the
+NDK of `android.ndkVersion`. When that NDK is not installed, AGP neither
+downloads it nor fails — it logs *"Unable to strip the following libraries,
+packaging them as they are"* and ships them unstripped, so the artefact follows
+the host. The version is pinned in `gradle/libs.versions.toml`, and
+`:app:verify<Variant>PinnedNdk` runs before the strip step of every release build
+and fails unless `ndk/<version>` holds that revision with an `llvm-strip`
+([`PinnedNdk`](../buildSrc/src/main/kotlin/app/knotwork/android/buildtools/PinnedNdk.kt)).
+`release.yml` installs the same version before building.
+
+**Observed failing** on a host carrying three other NDKs but not the pinned one —
+the host whose release build had shipped the libraries unstripped. With the
+pinned NDK installed, the same build stripped them to the bytes CI publishes.
+
+## Supply chain
+
+Every gate above checks the code in this repository. Of the four below, three
+check what the build *pulls in* or *ships* — the GitHub Actions and the Gradle
+distribution, every dependency, the manifests libraries merge in — and the
+fourth checks what a commit might carry *out*. They share one question: **can the same commit of this
+repository run different bytes tomorrow, or ship something nobody here wrote?**
+
+The release job is why that question is not academic. It decodes the signing
+keystore and exports its passwords in the same job that runs `setup-gradle`,
+downloads the Gradle distribution and resolves every dependency; code planted
+by any of those runs inside the build JVM that holds the key.
+
+### Supply-chain pin guard (`verifySupplyChainPins`)
+
+`:app:verifySupplyChainPins` fails the build when:
+
+- a `uses:` anywhere under `.github/` names a third-party action by anything
+  but a **full 40-character commit SHA followed by a version comment**
+  (`actions/checkout@<sha> # v6.1.0`). A tag or a branch is a pointer its owner
+  can move; an abbreviated SHA is a prefix, and a prefix can collide. Local
+  references (`./…`) pass, since their contents are part of the commit, and a
+  `docker://` image passes only with a `@sha256:` digest;
+- `gradle/wrapper/gradle-wrapper.properties` has no `distributionSha256Sum`.
+  `validateDistributionUrl` checks that the URL is well formed, not the bytes
+  behind it.
+
+The version comment is required, not decorative: a bare SHA is unreadable in
+review, and Dependabot rewrites the version only where the comment sits on the
+same line. Dependabot (`.github/dependabot.yml`) proposes new pins monthly, one
+grouped pull request, holding each new release back for seven days; Gradle
+dependencies are deliberately not in its scope (see *Dependency verification*).
+
+**What it does not check.** That a SHA is the commit its comment names, or that
+the checksum is Gradle's. Both are one lookup away when reviewing the change that
+introduced them, and neither can be answered without the network. What the guard
+catches is a pin *disappearing* — a step copied from a README, a
+`./gradlew wrapper` run without `--gradle-distribution-sha256-sum`. The wrapper
+itself compares the checksum only when it downloads the distribution, so a
+machine with it already cached never re-checks. The wrapper **JAR** is checked by
+`setup-gradle`, which validates it against Gradle's published checksums on every
+CI run by default.
+
+**Observed failing.** On the tree before the pins: 28 references in the four
+workflows (`checkout`, `setup-java`, `setup-android`, `setup-gradle`,
+`upload-artifact`), plus the missing distribution checksum — one failure listing
+all 29. The wrapper's own check was observed separately: with one digit of the
+sum changed and an empty Gradle home, the wrapper refused the download, and the
+checksum it reported as actual was the committed one. The rules are unit-tested
+in `buildSrc` (`SupplyChainPinsCheckerTest`) — tag, branch, abbreviated SHA, no
+ref, no version comment, quoted values, local and `docker://` references, a
+commented-out `uses:`. The task refuses a tree in which it found no reference at
+all, so a pattern that silently stopped matching cannot pass every workflow.
+
+### Merged-manifest guard (`verify<Variant>MergedManifest`)
+
+The source manifests are not what ships. The merger folds in every library's
+own manifest, so a dependency bump can add a permission, an exported component
+or a `queries` entry without a line of this repository changing — and
+[`PRIVACY.md`](../PRIVACY.md) §5 enumerates the permissions, while
+[`SECURITY.md`](../SECURITY.md) names every export any installed app can reach.
+
+`:app:verifyFullReleaseMergedManifest` and `:app:verifyFossReleaseMergedManifest`
+reduce the merged manifest that is packaged into each release APK and AAB
+(`SingleArtifact.MERGED_MANIFEST`) to its entry surfaces and compare them with
+[`config/merged-manifest/<variant>.txt`](../config/merged-manifest/fullRelease.txt):
+
+- `uses-permission NAME [maxSdkVersion=N]` — what the app asks for;
+- `permission NAME protectionLevel=LEVEL` — what it declares for others to request;
+- `exported TAG NAME permission=PERMISSION|none` — every component another app can
+  start or bind, **with the permission it demands** (for a provider, also its
+  `readPermission` / `writePermission`): an export that loses its permission is a
+  new surface under an old name, and the line changes. Anything but a literal
+  `android:exported="false"` counts as exported, so a value resolved from a
+  resource at runtime is listed rather than assumed closed;
+- `queries package|intent|provider …` — the package visibility the app claims.
+
+The failure prints the exact lines to add (`+`) or remove (`-`) and where to look
+up an entry's origin (`app/build/outputs/logs/manifest-merger-*-report.txt`). The
+expectation is **edited by hand, and there is deliberately no task that rewrites
+it**: each line is a decision the privacy policy or the threat model has to
+reflect, and a generator would turn each of those decisions into a keystroke.
+
+Non-exported components are left out — they are no entry surface, and an
+expectation that churned on every internal service a library adds would be
+approved without being read. Only release variants are checked, because only
+they ship; the debug overlay's receiver is covered by the source-manifest census
+`ExportedComponentInventoryTest`. The two layers are distinct: that test pins what
+this repository *writes*, this guard what the build *ships*. Merging both release
+manifests costs seconds and needs neither signing nor R8.
+
+An expectation can also say what must **not** be there: `absent TEXT` fails the
+build if any attribute of any element — exported or not — contains `TEXT`. The
+`foss` expectation uses it for the one thing that flavour promises about Google
+code: no `com.google.android.datatransport`, `com.google.firebase` or
+`com.google.android.gms` element. The data-transport classes and their endpoint
+still ship in the `foss` dex (MediaPipe pulls them in); what keeps them inert is
+that `src/foss/AndroidManifest.xml` removes the three components that would let
+them find a backend or schedule an upload. None of the three is exported, so the
+entry list alone would not notice one coming back. Observed failing with one of
+the three removals deleted: the build named the returned `JobInfoSchedulerService`,
+which the entry list did not.
+
+**Observed failing — on a genuine divergence.** The merged release manifests
+either side of the commit that added WorkManager differ by four entries, none of
+them from the app's own manifest: `RECEIVE_BOOT_COMPLETED`, `WAKE_LOCK`, an
+exported `DiagnosticsReceiver` and an exported `SystemJobService`. Nothing in the
+repository recorded that they had arrived. Those two build outputs are now the
+fixture of `MergedManifestInventoryTest`, next to cases for each entry kind, a
+non-exported component, an export that lost its permission, and an expectation
+that lists an entry twice (a duplicate would hide the removal of one copy).
+
+### SLF4J provider guard (`verify<Variant>NoSlf4jProvider`)
+
+Koog and the libraries under it log through SLF4J. An SLF4J provider on the
+classpath decides where those lines go, and the one Koog's Android client brought
+in, `slf4j-simple`, wrote them to `System.err` — logcat — past the redaction the
+app applies to its own logs; some of Koog's lines are model output. The module
+is excluded in `configurations.configureEach` (`app/build.gradle.kts`), and with
+no provider SLF4J 2 uses its no-op logger.
+
+`:app:verifyFullReleaseNoSlf4jProvider` and `:app:verifyFossReleaseNoSlf4jProvider`
+keep any other provider out. They read the Java resources of each release
+variant's runtime classpath (the `android-java-res` view) and fail on a
+`META-INF/services/org.slf4j.spi.SLF4JServiceProvider` file that lists a class —
+the only way an SLF4J 2 provider registers
+([`Slf4jProviders`](../buildSrc/src/main/kotlin/app/knotwork/android/buildtools/Slf4jProviders.kt),
+unit-tested in `buildSrc`). They run in `check` and before R8 on every release
+build, and refuse to pass when they receive no resources.
+
+Why not the APK: R8 turns a `ServiceLoader` lookup it can resolve into a direct
+constructor call and drops the service file, so the packaged APK shipped the
+provider with no registration left to find. Why not the variant API's
+`ScopedArtifact.JAVA_RES`: for the `ALL` scope it hands a task no files (AGP
+9.3.1), which the guard's own refusal to pass vacuously surfaced.
+
+**Observed failing.** Before the exclusion, both variants:
+`slf4j-simple-2.0.17.jar registers org.slf4j.simple.SimpleServiceProvider`.
+After it, the full release mapping holds no `org.slf4j.simple` class.
+
+### Dependency verification (`gradle/verification-metadata.xml`)
+
+Every artifact Gradle resolves — plugins, `buildSrc`'s dependencies, the app's
+libraries, and the tools the build runs (lint, detekt, ktlint, the Kover agent,
+AGP's own tool jars such as `aapt2`) — is verified before it is used, in every
+build, locally and in CI. There is no task to wire: Gradle refuses a build that
+resolves an artifact the file does not vouch for, and the verdict depends on
+nothing but the repository.
+
+**The policy: trust a publisher where there is a signature, the bytes where there
+is not.**
+
+- **Signed artifacts are verified against the publisher's key**, trusted for a
+  group rather than a version (`<trusted-keys>`, 119 keys). A version bump of a
+  dependency whose publisher is already trusted needs no change here. That is
+  deliberate: a review of a short list of publisher keys is one a person can
+  actually do, whereas thousands of checksums nobody can check by eye would be
+  approved without being read.
+- **Only an organisation's release key is trusted across a namespace** — Google's
+  Maven signing key for its `androidx.*` / `com.android.*` / `com.google.*`
+  groups, JetBrains' release keys for `org.jetbrains.*`. **Every other key is
+  trusted for exactly the groups it was seen signing.** Gradle's generator does
+  not draw that line: it folded the personal keys of a Guava maintainer and an
+  Error Prone maintainer into all of `com.google.*`, and the long-dead Bintray
+  signing key into all of `org.jetbrains.*`, because each had signed a few groups
+  under that prefix — so any one of those keys, leaked, would have vouched for
+  Firebase. Eleven such entries were narrowed to the groups the key actually
+  signed, read from the signatures of every artifact this build resolves. That
+  census has to include configurations no local build resolves: the first one
+  came from running every CI task list, missed the connected-test runner's
+  plugins, and the instrumented suite failed verification on CI. The census now
+  comes from a bootstrap dry run, which resolves every resolvable configuration,
+  and each configuration was then resolved in strict mode.
+- **Unsigned artifacts are pinned by SHA-256**, per version (145 files) — part of
+  Firebase's transitive graph and older `androidx` releases, for example, are
+  published without a signature.
+- **The keys are committed** (`gradle/verification-keyring.keys`, armored) **and
+  key servers are disabled**, so a build never contacts one.
+- **Three kinds of file are trusted without verification**: `-sources` and
+  `-javadoc` jars, and Gradle's own source distribution (`gradle-<v>-src.zip`),
+  which Android Studio's sync fetches so build scripts can be navigated. The IDE
+  downloads them; the build never executes them. The first sync after this file
+  landed failed on exactly that zip — no command-line build ever asks for it —
+  and the second on the metadata of the Groovy bundled with Gradle, which the IDE
+  resolves for sources: signed by the Groovy release manager's key, which the file
+  had trusted only for Groovy's older `org.codehaus.groovy` coordinates. Both were
+  reproduced without the IDE, by an init script adding the repository it uses and
+  resolving the same coordinates, before and after the fix.
+
+**The policy is enforced, not only written down.** `:app:verifySupplyChainPins`
+fails when `verify-metadata` or `verify-signatures` is off, when key servers are
+on, when the file holds an `<ignored-key>`, when `<trusted-artifacts>` holds an
+entry outside `dependencyVerificationTrustedArtifacts` (one `group=".*"` entry
+would switch verification off for everything), and when a key outside the list of
+organisation release keys in `app/build.gradle.kts`
+(`dependencyVerificationNamespaceKeys`, each with its owner) is trusted by
+`regex="true"` — or when any key is trusted wider than a namespace of two parts
+(`^com[.]google…` passes, `^com…` and `.*` do not). Both of the generator's own
+outputs fail it: the file before
+narrowing on its 11 widened personal keys, and the first attempt additionally on
+its 14 ignored keys and its key servers.
+
+**Bumping a dependency.** If the new version is signed by a trusted key, nothing
+changes. Otherwise the build fails naming what it cannot verify; record it with
+
+```bash
+./gradlew --write-verification-metadata pgp,sha256 --export-keys <the failing tasks>
+```
+
+and read the diff. A new trusted key is a decision to trust a publisher: check its
+fingerprint against one the project publishes itself before accepting it. A new
+checksum is trust on first use — nothing but that download vouches for it.
+**A checksum mismatch on an existing entry is never fixed by regenerating**: it is
+the substitution the file exists to catch. Gradle never removes an entry that is
+no longer used; to prune, move the file aside, regenerate, and compare.
+
+**Generating it.** `--write-verification-metadata` records only what the build
+actually resolves, and a task that is up to date or restored from the build cache
+resolves nothing. So the file was generated with `--rerun-tasks` over every task
+list CI runs — `check :buildSrc:test`, the instrumented-source compile, the
+generators, both release flavours and the App Bundle. For this build the rerun
+added no entry, because every tool jar a cached task would have resolved is
+signed by an already-trusted key — but only the rerun makes that a measurement
+rather than an assumption. Keys the key servers failed to return were fetched by
+hand, and Google's was checked against a second channel
+(`dl.google.com/linux/linux_signing_key.pub`), since a key Gradle cannot download
+is written down as *ignored* and its artifacts silently fall back to first-use
+checksums.
+
+**What it does not cover.** Robolectric downloads its `android-all` jars itself at
+test time, checking only a SHA-512 fetched from the same repository. Android SDK
+packages come from `sdkmanager` and AGP's auto-download; the JDK comes from
+`setup-java` in CI — the daemon's criteria no longer name a vendor, so CI never
+needs Gradle's toolchain download, which carries no checksum at all. None of these
+goes through Gradle's resolution. And verification is not vulnerability scanning:
+a verified artifact can still be a vulnerable one.
+
+**Observed failing.** Two ways, both on this repository. Adding a dependency
+from a publisher not yet trusted (`org.jsoup:jsoup:1.18.1`) failed the build on
+its `.pom`, with Gradle's note that key servers are disabled and the keyring
+lacks the key. One changed digit in the recorded checksum of an unsigned artifact
+(`firebase-encoders-17.0.0.jar`) — indistinguishable from the artifact itself
+having changed — failed on that jar. A Firebase BOM bump (`34.18.0` → `34.19.0`)
+passed without touching the file, as it should: its artifacts are signed by the
+trusted Google key.
+
+The generation had a failure of its own worth knowing. On the first attempt the
+key servers did not return 14 keys — Google's Maven signing subkey among them —
+and Gradle wrote each down as *ignored* and fell back to first-use checksums for
+everything it signs, reporting only that "some problems were discovered". The
+keys were fetched explicitly and the file generated again. With the final file,
+every task list CI runs passed in an empty Gradle home with every task executed,
+and CI's Linux runners passed `check` and the instrumented suite — which resolve
+the Linux `aapt2` jar and the connected-test runner, neither of which a macOS
+build ever downloads.
+
+### Secret scan (CI)
+
+A step in the required `check` job runs [gitleaks](https://github.com/gitleaks/gitleaks)
+over every commit under review: a pull request's own commits, or a push's new
+ones. Every commit, not the final tree — a key added in one commit and deleted in
+the next is still published the moment the branch is pushed. gitleaks reads each
+commit's own diff and skips merge commits, so it reports fewer commits than the
+range holds — and a line that exists only in a merge's conflict resolution is not
+scanned. A manual run, or the
+release workflow calling this one for a tag, scans what the ref has that `main`
+does not; for a release tag that is nothing, since its commits were scanned on
+their way into `main`.
+
+It is a step rather than a job of its own because branch protection requires the
+`check` job by name, and a job that fails before it makes it *skipped* — which
+branch protection counts as success.
+
+- **The scanner is pinned by bytes.** The workflow downloads the gitleaks release
+  archive and checks it against a SHA-256 written next to the version; bumping
+  the version means updating both. The gitleaks GitHub Action is not used: it
+  downloads its binary with no checksum and defaults to an older release. The
+  rules are gitleaks' defaults, fixed by that version.
+- **A hit fails the job, and the log shows no secret** (`--redact`).
+- **A waiver covers one line, never a path or a pattern.** Before the commit is
+  pushed, it is an inline `gitleaks:allow` on the offending line: it travels with
+  that line and is visible in the diff that introduces it. Once the commit is
+  pushed, that no longer helps — the scan reads every commit's own diff, so a later
+  commit adding the waiver leaves the original flagged — and the waiver is the
+  finding's fingerprint in [`.gitleaksignore`](../.gitleaksignore)
+  (`commit:file:rule:line`), which names that one commit and exempts nothing
+  written later. [`.gitleaks.toml`](../.gitleaks.toml) has no path or regex
+  allowlist on purpose: a real key pasted into a test is still a leaked key, so
+  "fixtures are exempt" would exempt exactly where one is most likely to be
+  pasted. Prefer a fixture that does not look like a key at all — too short, or
+  plainly fake; the sanitizer tests' `key=AIzaSyREALSECRET123` matches no rule.
+
+**What it does not do.** Scan history before the change under review — the
+whole-history pass is a separate, one-off audit. Know whether a hit is live: that
+would mean calling the provider's API from CI, which makes the verdict a
+function of the network. And it does not replace GitHub's own secret scanning or
+push protection, which are repository settings rather than files and which see
+provider-verified patterns this scan does not.
+
+**Observed failing.** A commit adding a random `ghp_`-shaped token failed the
+exact command the workflow runs (rule `github-pat`, exit 1); the same line with
+`gitleaks:allow` passed. Then the scan stopped the change that introduced it: a
+test fixture holding a public PGP key fingerprint tripped `generic-api-key` on
+CI. It is not a secret, but it was already pushed, which is how the second
+waiver — the commit-bound `.gitleaksignore` entry — came to exist. Before
+wiring, the default rules were run over the whole tree and all of history: one
+hit, a short preview fixture (`sk-live-…`) in `:catalog`, outside the range any
+future change scans unless that line is edited.
 
 ---
 
@@ -1841,17 +2258,22 @@ merging. It must never be added to branch protection's required checks — and
 note that a scheduled workflow only runs from the default branch, and only once
 its definition has reached it.
 
+Before any Gradle step, the job scans the commits under review for secrets (see
+*Secret scan* above), and a dependency-verification failure uploads Gradle's
+report (`build/reports/dependency-verification/`) as an artifact.
+
 The same workflow is also exposed as a reusable one (`workflow_call`) and is
 called as the first job of `.github/workflows/release.yml`, so a release cannot
 be built against a definition of "green" that has drifted from the one pull
 requests are measured by. `release.yml` adds the checks that only make sense on
-a release build — the tag ↔ `versionName` agreement, `verify<Variant>KeepRules`
-on both flavours, a check that the `foss` APK carries no Firebase configuration,
+a release build — the tag ↔ `versionName` agreement, the pinned NDK installed and
+checked, `verify<Variant>KeepRuleTargets` and `verify<Variant>KeepRules` on both
+flavours, a check that the `foss` APK carries no Firebase configuration,
 a check that both APKs ship the native libraries the app loads (LiteRT-LM and
 MediaPipe Tasks) and not the MediaPipe text-generation library the build
 excludes, and a signature check of every published artefact against the
-expected certificate fingerprint. The release procedure itself is documented in
-[`release.md`](release.md) §9.
+expected certificate fingerprint and for both APK signature schemes, v2 and v3.
+The release procedure itself is documented in [`release.md`](release.md) §9.
 
 ---
 
@@ -1862,8 +2284,11 @@ expected certificate fingerprint. The release procedure itself is documented in
   instrumented tests themselves do run in CI, in their own workflow; their
   results simply do not feed the coverage number.
 - It does not run the `release` variant — lint and tests target `debug`. R8
-  regressions are therefore invisible here; the release-only guard above
-  (`verify<Variant>KeepRules`) runs as part of the release assemble instead,
+  regressions are therefore invisible here; the release-only guards above
+  (`verify<Variant>KeepRuleTargets`, `verify<Variant>KeepRules`,
+  `verify<Variant>PinnedNdk`) run as part of the release build instead,
   which on CI means `release.yml` rather than this workflow.
 - It does not perform dependency-vulnerability scanning — that is a
-  separate workstream.
+  separate workstream. Dependency *verification* (above) answers a different
+  question: whether an artifact is the one its publisher signed, not whether it
+  is safe.

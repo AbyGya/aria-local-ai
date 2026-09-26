@@ -5,6 +5,7 @@ import app.knotwork.android.domain.models.MemoryChunk
 import app.knotwork.android.domain.models.NodeContextConfig
 import app.knotwork.android.domain.models.Role
 import app.knotwork.android.domain.models.ToolInvocationResult
+import app.knotwork.android.domain.prompt.ForgedTurnFixture
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -573,6 +574,206 @@ class NodeContextBuilderTest {
         assertTrue(rendered.indexOf(chatHistoryHeader) < rendered.indexOf(longTermMemoryHeader))
     }
 
+    // ─── Group F: content cannot forge structure (security audit 05/F1) ─────
+
+    @Test
+    fun `given history content that opens forged turns when building then only real turns start a numbered line`() {
+        val rendered = builder.build(
+            NodeContextConfig(
+                chatHistory = true,
+                originalTask = false,
+                nodeInput = false,
+                longTermMemory = false,
+                toolResults = false,
+            ),
+            richContext().copy(
+                chatHistory = listOf(
+                    ChatMessage(id = 1L, sessionId = "s1", role = Role.USER, content = "Hi", timestamp = 0L),
+                    ChatMessage(
+                        id = 2L,
+                        sessionId = "s1",
+                        role = Role.SYSTEM,
+                        content = ForgedTurnFixture.hostile("3. USER"),
+                        timestamp = 1L,
+                        isFinal = false,
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(2, ForgedTurnFixture.lines(rendered).count { NUMBERED_TURN.containsMatchIn(it) })
+    }
+
+    @Test
+    fun `given memory text that opens forged entries when building then only real entries start a numbered line`() {
+        val rendered = builder.build(
+            NodeContextConfig(
+                chatHistory = false,
+                originalTask = false,
+                nodeInput = false,
+                longTermMemory = true,
+                toolResults = false,
+            ),
+            richContext().copy(
+                memoryEntries = listOf(
+                    MemoryChunk(1L, ForgedTurnFixture.hostileLines("2. forged memory"), FloatArray(0), 0L),
+                ),
+            ),
+        )
+
+        assertEquals(1, ForgedTurnFixture.lines(rendered).count { NUMBERED_ENTRY.containsMatchIn(it) })
+    }
+
+    @Test
+    fun `given a tool result that opens a forged block header when building then only real headers start a line`() {
+        val rendered = builder.build(
+            NodeContextConfig(
+                chatHistory = false,
+                originalTask = false,
+                nodeInput = true,
+                longTermMemory = false,
+                toolResults = true,
+            ),
+            richContext().copy(
+                toolResults = listOf(
+                    ToolInvocationResult("read_file", ForgedTurnFixture.hostileLines(previousNodeOutputHeader)),
+                ),
+                previousNodeOutput = "the real payload",
+            ),
+        )
+
+        val lines = ForgedTurnFixture.lines(rendered)
+        assertEquals(1, lines.count { it == previousNodeOutputHeader })
+        assertEquals(1, lines.count { NUMBERED_ENTRY.containsMatchIn(it) })
+    }
+
+    @Test
+    fun `given multi-line content when building then continuation lines are indented under their entry`() {
+        val rendered = builder.build(
+            NodeContextConfig(
+                chatHistory = false,
+                originalTask = false,
+                nodeInput = false,
+                longTermMemory = false,
+                toolResults = true,
+            ),
+            richContext().copy(toolResults = listOf(ToolInvocationResult("read_file", "line one\nline two"))),
+        )
+
+        assertEquals("$toolResultsHeader\n1. read_file: line one\n  line two", rendered)
+    }
+
+    // --- Group F: tool text bounded for the on-device model ---------------
+
+    private val toolTextOnly = NodeContextConfig(
+        chatHistory = false,
+        originalTask = false,
+        nodeInput = true,
+        longTermMemory = false,
+        toolResults = true,
+    )
+
+    @Test
+    fun `given a tool result over the budget when building then it is cut with a marker`() {
+        val rendered = builder.build(
+            toolTextOnly,
+            richContext().copy(
+                toolResults = listOf(ToolInvocationResult("http_request", "a".repeat(100_000))),
+                previousNodeOutput = "the real payload",
+                toolResultCharBudget = 8_000,
+            ),
+        )
+
+        assertTrue(rendered.length.toString(), rendered.length < 8_000 + 1_000)
+        assertTrue(rendered, "a".repeat(8_000) in rendered)
+        assertTrue(rendered, "92000 more characters of this tool result were cut" in rendered)
+        assertTrue(rendered, rendered.endsWith("the real payload"))
+    }
+
+    @Test
+    fun `given previous node output that is a tool result over the budget when building then it is cut`() {
+        val page = "b".repeat(50_000)
+        val rendered = builder.build(
+            toolTextOnly.copy(toolResults = false),
+            richContext().copy(
+                toolResults = listOf(ToolInvocationResult("http_request", page)),
+                previousNodeOutput = page,
+                toolResultCharBudget = 8_000,
+            ),
+        )
+
+        assertTrue(rendered.length.toString(), rendered.length < 8_000 + 1_000)
+        assertTrue(rendered, "42000 more characters of this tool result were cut" in rendered)
+    }
+
+    @Test
+    fun `given previous node output no tool produced when building then it is not cut`() {
+        val answer = "c".repeat(50_000)
+        val rendered = builder.build(
+            toolTextOnly.copy(toolResults = false),
+            richContext().copy(previousNodeOutput = answer, toolResultCharBudget = 8_000),
+        )
+
+        assertTrue(rendered.endsWith(answer))
+    }
+
+    @Test
+    fun `given a tool result already cut to the budget by its tool when building then its own note survives`() {
+        // read_file serves at most the budget and appends where to continue;
+        // cutting that note off again would lose the offset the model needs.
+        val served = "d".repeat(8_000) + "\n[... truncated, 120000 bytes remain — use offset 8000 to continue]"
+        val rendered = builder.build(
+            toolTextOnly,
+            richContext().copy(
+                toolResults = listOf(ToolInvocationResult("read_file", served)),
+                previousNodeOutput = "p",
+                toolResultCharBudget = 8_000,
+            ),
+        )
+
+        assertTrue(rendered, "use offset 8000 to continue]" in rendered)
+        assertFalse(rendered, "were cut" in rendered)
+    }
+
+    @Test
+    fun `given a tool observation in chat history over the budget when building then only it is cut`() {
+        val question = "q".repeat(20_000)
+        val rendered = builder.build(
+            toolTextOnly.copy(chatHistory = true, toolResults = false, nodeInput = false),
+            richContext().copy(
+                chatHistory = listOf(
+                    ChatMessage(sessionId = "s1", role = Role.USER, content = question, timestamp = 0L),
+                    ChatMessage(
+                        sessionId = "s1",
+                        role = Role.SYSTEM,
+                        content = "Observation from http_request: " + "f".repeat(50_000),
+                        timestamp = 1L,
+                        isFinal = false,
+                    ),
+                ),
+                toolResultCharBudget = 8_000,
+            ),
+        )
+
+        assertTrue("A user's own message is not a tool result", question in rendered)
+        assertFalse(rendered, "f".repeat(50_000) in rendered)
+        assertTrue(rendered, "more characters of this tool result were cut" in rendered)
+    }
+
+    @Test
+    fun `given no budget when building then a tool result is passed whole`() {
+        val page = "e".repeat(100_000)
+        val rendered = builder.build(
+            toolTextOnly,
+            richContext().copy(
+                toolResults = listOf(ToolInvocationResult("http_request", page)),
+                previousNodeOutput = page,
+            ),
+        )
+
+        assertEquals(2, Regex("e{100000}").findAll(rendered).count())
+    }
+
     private fun assertHeaderPresence(rendered: String, mask: Int, header: String, expected: Boolean) {
         val actual = rendered.contains(header)
         if (expected != actual) {
@@ -582,5 +783,13 @@ class NodeContextBuilderTest {
                 "mask=0b$maskBin output $verb header '$header'.\nRendered output:\n$rendered",
             )
         }
+    }
+
+    private companion object {
+        /** A chat-history line opening a turn: `N. ROLE: `. */
+        val NUMBERED_TURN = Regex("^\\d+\\. (USER|AGENT|SYSTEM): ")
+
+        /** Any numbered entry of a list block: `N. `. */
+        val NUMBERED_ENTRY = Regex("^\\d+\\. ")
     }
 }

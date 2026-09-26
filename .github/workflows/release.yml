@@ -69,16 +69,16 @@ jobs:
       IS_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         with:
           # Only platform-tools. The action's default also asks for the legacy
           # `tools` package (SDK Tools 26), which nothing in this build uses and
@@ -86,8 +86,24 @@ jobs:
           # package 'tools'") — it broke the release job twice in a row.
           packages: 'platform-tools'
 
+      - name: Install the pinned NDK
+        # The NDK's `llvm-strip` strips the prebuilt native libraries. AGP never
+        # downloads an NDK for that — without the pinned one it would ship them
+        # unstripped — so `verify<Variant>PinnedNdk` fails the build instead, and
+        # the release must not depend on which NDKs this runner image happens to
+        # carry. The version is read from the catalog, the one place it is bumped.
+        run: |
+          set -euo pipefail
+          ndk="$(sed -n 's/^ndk = "\(.*\)"$/\1/p' gradle/libs.versions.toml)"
+          if [[ -z "$ndk" ]]; then
+            echo "::error::gradle/libs.versions.toml declares no \`ndk\` version."
+            exit 1
+          fi
+          sdkmanager --install "ndk;$ndk"
+          echo "NDK $ndk installed."
+
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
         with:
           # A tag is not `main`, so the cache is read-only and seeded from the
           # last `main` build — a release must never poison the shared cache.
@@ -312,11 +328,23 @@ jobs:
             local apk="$1"
             echo "── $apk"
             local out
-            out="$("$apksigner" verify --print-certs --verbose "$apk")"
+            # `--min-sdk-version 24` (the first release that reads v2) makes
+            # apksigner verify the v2 block as well: at the app's own minSdk it
+            # checks v3 alone and reports v2 as not verified even when present.
+            out="$("$apksigner" verify --print-certs --verbose --min-sdk-version 24 "$apk")"
             if grep -qi 'CN=Android Debug' <<< "$out"; then
               echo "::error::$apk is signed with the ANDROID DEBUG key — release signing fell back. Check the RELEASE_* secrets."
               exit 1
             fi
+            # Both schemes, explicitly: v3 is the one a signing-key rotation is
+            # expressed in, and v2 is what every earlier release carried — AGP
+            # drops it at this minSdk once v3 is on unless asked to keep it.
+            for scheme in 'v2 scheme (APK Signature Scheme v2)' 'v3 scheme (APK Signature Scheme v3)'; do
+              if ! grep -qxF "Verified using $scheme: true" <<< "$out"; then
+                echo "::error::$apk is not signed with APK Signature Scheme ${scheme%% *} — check enableV2Signing / enableV3Signing in app/build.gradle.kts."
+                exit 1
+              fi
+            done
             local actual
             actual="$(grep -m1 -i 'certificate SHA-256 digest' <<< "$out" | awk '{print $NF}' | tr 'A-F' 'a-f')"
             if [[ "$actual" != "$expected" ]]; then
@@ -367,7 +395,7 @@ jobs:
       - name: Upload the R8 mapping files
         # A workflow artefact, not a release asset: the mapping deobfuscates
         # crash reports and belongs with the maintainer, not on the download page.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: r8-mapping-${{ steps.version.outputs.version }}
           path: |
@@ -382,7 +410,7 @@ jobs:
         # dry run no release is created and this is the only way to inspect
         # what was built.
         if: env.IS_DRY_RUN == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets-${{ steps.version.outputs.version }}
           path: release-assets/

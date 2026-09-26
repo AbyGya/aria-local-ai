@@ -126,6 +126,7 @@ class PipelineSecurityContourTest {
         toolRepository = mockk()
         chatRepository = mockk(relaxed = true)
         settingsRepository = mockk()
+        every { settingsRepository.workspaceReadTokenBudget } returns flowOf(2_000)
         context = mockk()
         every { context.filesDir } returns tempFolder.root
 
@@ -159,7 +160,8 @@ class PipelineSecurityContourTest {
         every { settingsRepository.httpToolMaxResponseBytes } returns flowOf(100_000L)
         // Allowlist contains a different domain so the test target is rejected as off-list.
         every { settingsRepository.allowedHttpDomains } returns flowOf(listOf("example.org"))
-        httpRequestExecutor = HttpRequestExecutor(OkHttpClient(), settingsRepository, apiKeyRepository)
+        httpRequestExecutor =
+            HttpRequestExecutor(OkHttpClient(), settingsRepository, apiKeyRepository, networkActivityTracker)
 
         val toolNodeExecutor = ToolNodeExecutor(
             llmEngine,

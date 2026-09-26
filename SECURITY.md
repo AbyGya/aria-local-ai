@@ -5,7 +5,7 @@ agent for Android: what data the app handles, how it is protected, what is sent
 off-device when the user opts in to crash reporting, and how to report a
 vulnerability you discover.
 
-The project is currently a **pre-release (0.10.1)** and is published primarily
+The project is currently a **pre-release (0.11.0)** and is published primarily
 for review and experimentation. There are no stability guarantees for storage
 formats, APIs, or persisted data across versions.
 
@@ -15,12 +15,12 @@ formats, APIs, or persisted data across versions.
 
 Only the latest release line is supported. As a solo pre-release project there
 are no maintained back-release branches or long-term-support tags; fixes land on
-the current `0.10.x` line and on the latest commit on `main`.
+the current `0.11.x` line and on the latest commit on `main`.
 
 | Version            | Supported          |
 |--------------------|--------------------|
-| `0.10.x` (latest)  | :white_check_mark: |
-| `< 0.10.1`         | :x:                |
+| `0.11.x` (latest)  | :white_check_mark: |
+| `< 0.11.0`         | :x:                |
 
 ---
 
@@ -52,6 +52,13 @@ storage and credentials:
     wait in the background: each record stores the staged **tool name and the
     exact arguments** awaiting approval (or the clarification question), so
     they are protected at rest like the conversation that produced them.
+  - `background_prompts` — the prompt of every queued background run: a
+    `schedule_task` instruction, a trigger's prompt, a request from another app.
+    The background runtime (WorkManager) keeps its queue in an unencrypted
+    database of its own, so it is handed only an id; the prompt stays here.
+    A task scheduled by an earlier release carried its prompt in the runtime's
+    store; a recurring one moves it here at its next run, and a one-time one
+    runs once and is pruned.
 - The SQLCipher passphrase is a **32-byte random value** persisted in a
   Keystore-backed encrypted store: each value is encrypted with AES-256-GCM
   under a dedicated, non-exportable key held in the Android Keystore, and
@@ -70,12 +77,20 @@ storage and credentials:
   or malformed entry, or a key/file mismatch after the database was restored
   from another install — raises a typed error that routes to a dedicated
   startup recovery screen. That screen offers **Retry** (keystore failures
-  are often transient) and an explicit **Erase all data** action behind a
+  are often transient) and an explicit **Erase data** action behind a
   typed confirmation; the app never wipes, re-keys, or silently recreates
   the passphrase store on its own while user data could be orphaned by it.
   The passphrase is read lazily at the first real database open — never
   during dependency injection — so a failure always surfaces where the UI
   can handle it.
+- **What Erase data erases.** The database and its passphrase first; then,
+  only once the database is gone, the agent workspace, the stored image
+  attachments, every temporary copy in the app cache, and every queued
+  background run — scheduled tasks and runs from triggers and other apps —
+  together with the runtime's record of finished ones. It keeps settings,
+  saved cloud API keys, the Hugging Face token and MCP credentials: they still
+  work on the device where the database failed, and the dialog says they are
+  kept. If the database cannot be deleted, nothing else is touched.
 - The store holding **cloud API keys** intentionally keeps the opposite,
   availability-first recovery: a key value that can no longer be decrypted is
   treated as unset and dropped. Unlike the database passphrase, keys can
@@ -108,14 +123,29 @@ storage and credentials:
   in-app export actions, and any custom pipelines / saved presets via the
   pipeline-library and preset JSON-export actions.
 
+### Backup and device transfer
+
+Nothing the app stores leaves the device through Android's cloud backup or a
+device-to-device transfer: `android:allowBackup` is off, and the data
+extraction rules exclude every storage domain from both. The transfer rules
+matter on their own, because on some devices `allowBackup="false"` does not
+stop a transfer.
+
+None of it would be usable elsewhere anyway. The database and the secret
+stores are sealed under Keystore keys that never leave the device, so a copy
+only lands the new install on the recovery screen, and the model files are
+found through the database. What is readable as is — attachments, the agent
+workspace, settings — is what must stay on the device; those three
+directories are also excluded by name. A new device starts empty.
+
 ### Agent file workspace (at-rest)
 
 The agent has a small private **workspace** — a single jailed directory
 (`files/agent_workspace/` inside the app's private `filesDir`) that the file
-tools (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_files`,
-`find_files`) read from and write to, and that the **Files** screen surfaces
-to the user. Its at-rest posture is deliberately **weaker than the
-database's**, and this is the honest statement of that trade-off:
+tools (`read_file`, `write_file`, `edit_file`, `append_file`, `delete_file`,
+`list_files`, `find_files`) read from and write to, and that the **Files**
+screen surfaces to the user. Its at-rest posture is deliberately **weaker than
+the database's**, and this is the honest statement of that trade-off:
 
 - The workspace lives in app-private internal storage, so it is protected by
   the device's **file-based encryption (FBE)** — the OS-level encryption that
@@ -141,6 +171,25 @@ database's**, and this is the honest statement of that trade-off:
   directory is refused with a typed `WorkspaceError.PathOutsideWorkspace`
   before any file is touched. A tool can therefore only ever read or write
   **inside** the workspace, never the rest of the app's private storage.
+- **Sharing hands over a copy, never the workspace.** The Files screen's
+  **Share** stages a copy of the file in the app cache and grants the receiving
+  app read access to that copy only. Deleting the file deletes its copies; any
+  other copy is removed once it is an hour old, by the next share or by the
+  daily maintenance pass — never earlier, so one share cannot take another
+  share's file away from an app that is still reading it. The maintenance pass
+  runs only while the phone is charging and idle, so without a later share a
+  copy can outlive the hour by more than a day on a phone that rarely is.
+- A path the filesystem cannot take — a NUL byte, a directory level that is a
+  file, or a name it rejects — is refused with `WorkspaceError.InvalidPath`
+  instead of an exception. A write that would **create** a file also needs a name
+  without control characters, line breaks or half of a surrogate pair, at most
+  242 bytes per name and 512 bytes per path. Imports replace such
+  characters with `_`; a file named before this rule can still be read and
+  deleted, and the file listings the agent reads show its control characters
+  escaped, so a name cannot add a line of its own to a listing.
+- The workspace is **not** in Android backup or device transfer (see
+  *Backup and device transfer*), and **Erase data** on the recovery screen
+  deletes it.
 
 ### Workspace quotas (availability control)
 
@@ -153,10 +202,37 @@ confidentiality:
   pre-checked before any bytes are committed by the atomic stage-and-rename
   write) keep a runaway `write_file` loop from exhausting device storage. User
   imports through the Files screen are charged against the same limits.
+- Bytes are not the only cost: a directory counts none and a tiny file almost
+  none. So the workspace also holds at most **10,000 entries** (files and
+  directories together, also `QuotaExceeded`), and a directory never outlives
+  its contents — deleting a file removes the directories it empties. The count
+  walks the directory without following symbolic links, the same walk the
+  listings use.
+- `find_files` matches its glob without backtracking, so a glob's cost grows with
+  its length times the path's, not exponentially; globs over 256 characters are
+  refused.
 - A **per-read token budget** (default 2000 tokens) truncates `read_file`
   output so a single large file cannot blow out the local model's context
-  window, and the `http_request` response is capped (1 MB default) so untrusted
-  remote content cannot do the same. Both limits are user-tunable.
+  window. The same budget cuts every other tool result (an `http_request`
+  response, an MCP result) where it becomes a prompt for the on-device model:
+  in the *Tool Results* block, as the *Previous Node Output* it forwards, and
+  as a tool's record in the chat history a node replays. A note says how much
+  was left out. A TOOL node counts too, since its input is the prompt the
+  model turns into the tool's arguments; a node given a cloud provider gets
+  tool results whole. The **response budget** (1 MB default) bounds what the
+  app reads and keeps of one `http_request` response or MCP result, far more
+  than any on-device context. Both limits are user-tunable.
+- **MCP servers are bounded where their content enters the app** (`KoogMcpClient`).
+  A tool result — and the text of an error the server returns instead — is cut
+  at the same user-tunable budget as an `http_request` response, with a marker
+  saying so. A server's catalogue — which reaches the
+  system prompt of every run, called or not — publishes at most 256 tools and
+  256 KB of names, descriptions and parameter schemas, with each description
+  clamped to 4 096 characters; a tool whose name breaks the MCP naming rule is
+  not published, and an unpublished tool cannot be called. The cut bounds what
+  the chat history, the run and later prompts carry, not what the transport
+  buffers while decoding a response: on the wire the only bound is the 60 s
+  call deadline.
 
 ### Run-history retention (mitigating control)
 
@@ -214,12 +290,59 @@ new risk surface, and the design constrains it deliberately:
   entry and an explicit, revocable consent.
 - **Inert until the user binds a pipeline.** A trigger, the share target and the
   tile all do **nothing** until the user explicitly points them at a pipeline —
-  the privacy-first default. An unbound trigger never fires, and a bound trigger
-  is **auto-disabled** if its pipeline is later deleted, so a dangling automation
-  can never wake and run an unintended graph.
+  the privacy-first default. An unbound trigger never fires. Deleting a pipeline
+  switches its triggers off and clears the share target, the tile and the default
+  that named it, and a share or tile whose binding names a pipeline that no longer
+  exists — say after *Erase data*, which keeps settings — does nothing, so a
+  dangling automation can never wake and run an unintended graph. A binding is to
+  a pipeline's identity, not to its steps: **importing a file with Replace** keeps
+  the identity, and with it every binding — the trigger, the share target, the
+  tile, the default pipeline, the chats and the pipelines that call it all run the
+  imported steps afterwards. That is by design (it is how an updated pipeline
+  keeps working), so the Replace confirmation names the pipeline already in the
+  library and lists each of those bindings before anything is written. A file
+  imported under the id of a pipeline that was deleted asks the same way: the
+  chats, triggers and calling pipelines that still name that id are listed, and
+  importing as a copy — the default — leaves them alone.
+- **What another app can reach without asking.** Three components are exported
+  without a permission. The launcher activity (`MainActivity`) only navigates: a
+  caller can open a chat by its id, and nothing runs. The other two take content
+  from any app on the device, and from `adb`: the share target
+  (`ShareReceiverActivity`) and the external-automation receiver
+  (`ExternalAutomationReceiver`), both below. The Quick Settings tile and the
+  AppFunctions service are exported too, but only the system can bind them. A
+  build-time test holds this list to the manifests, so a new export fails the
+  build until it is added — and, if it asks for no permission, named here.
+- **One function is published to other apps.** `KnotworkAppFunctionService`
+  publishes `search`, a read-only Wikipedia lookup through the built-in
+  `search_tool`, on Android 16 and later. Only the system binds the service, and
+  only an agent holding `EXECUTE_APP_FUNCTIONS` — which Android 16 grants to
+  privileged system apps — can call it. The call does not pass through the
+  agent's tool catalogue, so the tool checks both of its switches itself:
+  switching `search_tool` off on the Tools screen stops it, and so does *Block
+  network from local model*, for every caller.
+- **The share target is reachable without the share sheet.** It has to be
+  exported for the share sheet to start it on the sending app's behalf, so an app
+  can also start it directly and put text of its choosing where the user's own
+  message goes — a stronger position than the tool-content injection accepted
+  below. What bounds it:
+  - it is inert until you bind a share pipeline, and the run is visible: the app
+    opens into the chat the run is in, and Android generally lets only an app you
+    are looking at start it;
+  - **at most 30 shares an hour start a run.** It is one budget for every sender,
+    because the sender is not known — so an app that uses it up holds your own
+    shares back until the hour moves. A refused share stores nothing and says why;
+  - a shared image passes the same pre-flight as a composer attachment, and only
+    another app's `content://` address is read;
+  - the run is an ordinary chat run, so the approval policy applies unchanged.
+
+  It has no switch of its own (the binding is the switch), no journal, and no
+  sender identity. Bind a pipeline you are comfortable running on text you did
+  not write.
 - **The external-automation contract is off by default and cannot be opened by
-  accident.** It is the only entry surface reachable by code the user did not
-  write, so it carries more than the shared defaults above:
+  accident.** Any app can broadcast to it without a permission, and a broadcast
+  needs no screen: a request can arrive from an app in the background and run
+  with nothing shown. So it carries more than the shared defaults above:
   - The switch raises a **consent dialog** naming what is being agreed to, and
     only moves once the user confirms. Turning it back off is immediate.
   - Even switched on it stays **inert until bound** to exactly one pipeline, and
@@ -237,6 +360,15 @@ new risk surface, and the design constrains it deliberately:
   - **Accepted requests are rate-limited** per hour, and **every request is
     journalled** — admitted or refused, with its typed reason — so a profile that
     silently does nothing can be diagnosed, and a looping one is visible.
+  - **While it is off, nothing is sent back.** A request is still journalled,
+    whatever it says, but no callback leaves the app: not the refusal, and not the
+    final report of a run admitted before the switch was turned off. Otherwise any
+    app could make this one broadcast an action and a string of its choosing, from
+    this app's identity, to a package of its choosing — with the feature off.
+  - **Caller text is bounded.** The request id is at most 128 characters and the
+    callback's action and package at most 256; a longer value is refused, not cut.
+    The journal keeps at most 256 characters of any value a refused request
+    carried, so a loop of refusals cannot fill the database.
   - The receiver declares `intentMatchingFlags="enforceIntentFilter"`, which
     **Android 16 and above enforce** and Android 14–15 ignore. The gap is
     narrower than it looks, and deliberately so: that flag is not what validates
@@ -245,21 +377,27 @@ new risk surface, and the design constrains it deliberately:
     explicit intent carrying a foreign action is refused identically on 14 as on
     16. Every other defence above lives in app code and is unaffected by the
     platform version.
-- **No new execution path, no relaxed gate.** A fired trigger (or an entry
-  surface, or an admitted external request) runs through the **exact same
-  background path** as a scheduled task — the same persisted-run lifecycle, the
-  same foreground-service promotion, and the same engine — attributed with a
-  distinct run origin (`TRIGGER` / `SHARE` / `QUICK_TILE` / `EXTERNAL`) only for
-  accounting. **An external call asks for a run; it does not approve what the run
+- **No new execution path, no relaxed gate.** A fired trigger, a tile tap or an
+  admitted external request runs through the **exact same background path** as a
+  scheduled task — the same persisted-run lifecycle, the same foreground-service
+  promotion, and the same engine — attributed with a distinct run origin
+  (`TRIGGER` / `QUICK_TILE` / `EXTERNAL`) only for accounting. A share runs as an
+  ordinary chat run (`SHARE`), in the foreground, since the app opens into it. **An external call asks for a run; it does not approve what the run
   then wants to do.** Crucially, the
-  **human-in-the-loop gate stays fully in force**: before any `SENSITIVE` or
-  `DESTRUCTIVE` tool executes inside any of these unattended runs, the run
-  **parks**
-  on a persistent approval notification and waits — it does **not** auto-approve
-  because no UI is attached. An unattended automation can therefore *propose* a
-  sensitive action but never *execute* one unreviewed; an unanswered park is
-  failed once the approval window elapses (see *Run-history retention* above and
-  *Two-phase HITL* in [docs/architecture.md](docs/architecture.md)). The
+  **human-in-the-loop gate stays fully in force**: a tool call the approval
+  policy would stop in a chat stops these unattended runs too, and the run
+  **parks** on a persistent approval notification and waits — it does **not**
+  auto-approve because no UI is attached. Under the default policy that is every
+  `SENSITIVE` or `DESTRUCTIVE` call, so an unattended automation can *propose* a
+  sensitive action but never *execute* one unreviewed. Setting *Approve tool
+  calls* to *Never* lets `SENSITIVE` calls through here exactly as in a chat;
+  a `DESTRUCTIVE` call asks under every policy, and the setting is the user's —
+  no caller can choose it. An unanswered park is failed once the approval
+  window elapses (see *Run-history retention* above and *Two-phase HITL* in
+  [docs/architecture.md](docs/architecture.md)). An answer
+  settles only the request it was given for — the card and each notification
+  carry that request's identity — so a second run waiting in the same chat
+  cannot be approved by the answer meant for the first. The
   background-execution arc — trigger fires → background run → notification →
   result in the bound chat, including the park-and-approve path — is covered
   end-to-end by an integration test.
@@ -278,13 +416,37 @@ new risk surface, and the design constrains it deliberately:
   journal and the external-request journal can be written to a file through the
   system share sheet on an explicit action. There is no network on that path —
   a build-time architecture check fails the build if a network dependency
-  reaches the export code — and the file carries the journal rows, not the
-  content of the runs they describe. Once the share sheet hands the file to
+  reaches the export code. The file carries the journal rows — including a
+  failed run's error message, which can quote the failing call — and never a
+  run's prompt or answer. Once the share sheet hands the file to
   another app, that app's handling is outside this threat model.
 - **Each trigger owns one bound chat.** A trigger's runs land in a single chat
   session named after it (recurring fires accumulate there), so the results of an
   autonomous run are visible and auditable in the same encrypted store as the
   rest of the conversation — never hidden.
+
+### Imported pipelines and the browser editor
+
+A pipeline file — imported into the app, or opened in the browser editor to
+look at it first — is content the user did not write. The importer
+(`PipelineJsonSerializer`) bounds what it can make the app store or show:
+
+- **What the editors show is what runs.** A file carries each node's settings
+  twice; the run reads the flat copy, and both editors display that copy rather
+  than the editor-only one. A router's branches are its outgoing edge labels,
+  and the canvas draws a port for each.
+- **Unclear or unsafe values refuse the file** instead of being guessed: an id
+  that is not one line of at most 128 characters, two nodes or edges sharing an
+  id, an edge label that names no branch of its node, an *Input data* switch
+  that is neither on nor off, a provider name the app does not know. Names and
+  labels become one bounded line; a file over 8 MB is not read.
+
+The browser editor is a second parser of the same format, and a file is often
+inspected there before it is imported. It reads a file by the app's rules — the
+same config keys, *Input data* flags, provider ids and branch labels — and a
+build-time guard (`BrowserEditorImportParityGuard`) checks each rule against the
+app's source. It is a single local page with its scripts inline, and it makes no
+network requests.
 
 ### Local usage statistics (on-device only)
 
@@ -298,8 +460,8 @@ telemetry surface so a regression cannot quietly add an upload. Recording is a
 local-only opt-in the user can disable or clear at any time; the *Share as text*
 / *Export JSON* actions are voluntary, one-shot, and routed only to a
 destination the user picks (a share sheet or a file). This is **separate from
-crash reporting** below, which is the only path that can transmit anything
-off-device, and only after an explicit opt-in.
+crash reporting** below, the only telemetry the app can send, and only after an
+explicit opt-in.
 
 ### Message attachments — images and audio (on-device guarantee)
 
@@ -316,17 +478,22 @@ their handling is constrained more tightly than text — and the constraints are
   central invariant of the multimodal feature: an image is delivered to **at
   most one on-device `LITE_RT` node** and `CloudLlmNodeExecutor` *structurally*
   ignores the image-delivery channel, so no code path can hand an attachment to
-  a cloud provider. A pre-flight check (`ResolveEntryInferenceUseCase`) runs
-  **before** the run is enqueued and blocks an image message whenever the bound
-  pipeline would start on — or only reach — a cloud step, with a clear message
-  that the draft and attachment are preserved. Audio never travels the graph at
-  all (see below). The honest framing: this is a guarantee of the **current
+  a cloud provider. A pre-flight check (`CheckImageAttachmentUseCase`) runs
+  **before** the run is enqueued — for an image attached in the chat and for one
+  shared into the app alike — and blocks it whenever the bound pipeline would
+  start on a cloud step or has no on-device step that could read it. The chat
+  keeps the draft and attachment; a blocked share stores nothing, starts no run
+  and says why. Audio never travels the graph at all (see below). The honest framing: this is a guarantee of the **current
   release**, enforced by the delivery code and the pre-flight gate, not a
   property the user has to configure.
 - **Image storage is FBE-protected, not SQLCipher-encrypted.** The picked or
   captured image is decoded, EXIF-rotated, downscaled (aspect ratio preserved,
   longest side ≤ 1536 px) and re-encoded to JPEG into the app-private
-  `files/attachments/` directory; the **original is never copied in**. That
+  `files/attachments/` directory; the **original is never copied in**. A photo
+  taken with the camera passes through the app cache first: the camera app
+  writes the full-resolution original — EXIF metadata, GPS included — to a
+  temporary capture file, which the app deletes as soon as the downscaled copy
+  exists, or when the capture is cancelled. That
   directory has the **same weaker-than-the-database at-rest posture as the agent
   workspace** (*Agent file workspace*, above): it is covered by the device's
   **file-based encryption (FBE)** and the app sandbox, but **not** additionally
@@ -334,12 +501,22 @@ their handling is constrained more tightly than text — and the constraints are
   attacker who can already read app-private storage on an unlocked,
   post-authentication device is out of scope (see *Out of scope*), but the
   difference is called out here so it is not a surprise.
+- **A shared image is read only from another app's content.** The share target
+  accepts an image from any app, and the app reads it with its own identity. It
+  therefore opens only a `content://` URI that another app's provider serves: a
+  `file://` path, or a URI of Knotwork's own file provider, is refused without
+  being read, so a share cannot pull the app's private files into a chat.
 - **Image retention and cleanup.** A stored image is deleted together with its
   owning message and session. Independently, a daily
   `AttachmentOrphanCleanupWorker` (the same charging + idle maintenance window
   as run retention) reclaims any attachment file that no message references,
   with a **24-hour grace window** so a freshly-picked image that is still in the
-  composer is never swept out from under the user.
+  composer is never swept out from under the user. The same pass removes every
+  temporary handoff file in the app cache that is more than an hour old — a
+  camera capture whose result never came back, a voice clip left by a crash,
+  share copies and journal exports. Stored images are **not** in Android backup
+  or device transfer (see *Backup and device transfer*), and **Erase data** on
+  the recovery screen deletes all of them with the temporary copies.
 - **Audio clips are ephemeral and deleted after transcription.** A recorded or
   picked clip is written as a temporary file in the app cache
   (`cacheDir/audio/`, FBE + sandbox, and subject to OS cache eviction). It is
@@ -366,9 +543,10 @@ only for gated repositories) is handled exactly like a cloud-provider key:
   exported archives, or anything committed to the repository. An earlier
   development build kept it in plain DataStore; a **one-time migration moves any
   legacy value into the Keystore store and removes the plaintext entry**.
-- **Sent only on the file download** that needs it. Browsing and metadata calls
-  are public and carry **no token**, so the token is never put on the wire for
-  ordinary discovery traffic.
+- **Sent only to `huggingface.co`, over HTTPS, on a model-file download.** The
+  download code attaches it from the request's own address, so a link the user
+  pastes, a mirror, or the CDN a Hub download redirects to never receives it.
+  Browsing and metadata calls are public and carry **no token**.
 
 ### API keys for cloud providers
 
@@ -378,17 +556,34 @@ only for gated repositories) is handled exactly like a cloud-provider key:
   dedicated Android Keystore key).
 - Keys are never written to plain `SharedPreferences`, DataStore, log files,
   exported chat archives, or any artifact checked into the repository.
+- A provider error can quote the failing request, key included (Google
+  authenticates by query parameter). Such text is scrubbed before it becomes a
+  run's error, a console line or a crash report, so it cannot reach an export,
+  the clipboard or Crashlytics that way either.
 
 ### MCP server credentials
 
 - Credentials for a configured MCP server (a Bearer token, Basic password, or
-  API-key value) are stored in the **same Keystore-backed encrypted store**,
-  keyed per server by a hash of its URL.
+  API-key value) **and its custom headers** are stored in the **same
+  Keystore-backed encrypted store**, keyed per server by a hash of its URL.
+  Headers are stored whole: the form invites an `Authorization` row, so any
+  value in it may be a credential.
 - The plain `mcp_servers_json` DataStore entry holds only **non-secret**
-  metadata (URL, transport, display name, custom headers) — never the auth
-  payload. An earlier build embedded auth inline in that entry; a **one-time
-  migration moves any inline auth into the encrypted store and strips it from
-  the JSON**.
+  metadata (URL, transport, display name) — never the auth payload or a
+  header. Earlier builds kept auth, and later custom headers, inline in that
+  entry; a **one-time migration moves them into the encrypted store and strips
+  them from the JSON**. The encrypted copy is committed before the plain one is
+  removed, so an interrupted migration leaves both, never neither.
+
+### Entering a secret
+
+Every field that takes a credential — a cloud provider's API key, the Hugging
+Face token, an MCP server's Bearer token, Basic password and API-key value, and
+a custom header's value — tells the keyboard it is a password, so a keyboard
+that honours the input type neither suggests it nor adds it to its dictionary.
+The MCP fields mask what is typed as well. What this cannot stop is a keyboard
+that ignores the input type: a keyboard sees everything typed into any field,
+which is why an input method granted by the user is outside this policy's scope.
 
 ### On-device processing by default
 
@@ -407,7 +602,8 @@ only for gated repositories) is handled exactly like a cloud-provider key:
   - Browsing or searching the curated `litert-community` organisation on the
     Hugging Face Hub from the **Discover** screen, and downloading a model
     file the user selects there or supplies by URL. Browsing is read-only and
-    anonymous; only a gated-file download carries the user's token.
+    anonymous; only a download from `huggingface.co` itself carries the user's
+    token.
   - The `http_request` tool reaching a host the user has explicitly added
     to the **allowed-domains allowlist** (empty by default; see *Outbound
     HTTP and the exfiltration chain* below).
@@ -419,6 +615,12 @@ only for gated repositories) is handled exactly like a cloud-provider key:
     are the tool's own switch on the **Tools** screen and the *Block network
     from local model* restriction, which withholds it; it has no allowlist and
     no per-call gate. See [PRIVACY.md § 3.4](PRIVACY.md#34-outbound-requests-from-tools).
+- A library can open a path of its own. The on-device embedding library
+  (MediaPipe) attaches a usage logger to every task it creates, which would
+  send usage counts and the device's model, build fingerprint, country and
+  carrier to Google. In release builds that call is removed when the app is
+  minified, and every release build checks its packaged code for it; the
+  `foss` build also lacks the component that would upload it.
 
 ### Prompt injection via tool content (accepted risk)
 
@@ -429,14 +631,64 @@ oversight — and it works as follows:
 - Text returned by any tool — Wikipedia extracts from the built-in
   `search_tool`, results from user-configured **MCP servers**, the body of an
   `http_request` response, and **the contents of a file the agent reads from
-  its workspace** — is fed back into the context of subsequent pipeline
-  nodes. A file the user imported through the Files screen (or that an
-  earlier `write_file` produced from untrusted material) is therefore
+  its workspace** (and the file **names** a listing returns: an imported file
+  keeps the name the source app gave it) — is fed back into the context of
+  subsequent pipeline nodes. A file the user imported through the Files screen
+  (or that an earlier `write_file` produced from untrusted material) is therefore
   **untrusted model input**, exactly like a network tool result: it may
   contain text that reads as instructions to the model. That content reaches
   planning and routing nodes (`DECOMPOSITION`, `INTENT_ROUTER`), so a crafted
   tool result or file can steer which branch a pipeline takes and
-  **influence the arguments of later tool calls** in the same run.
+  **influence the arguments of later tool calls** in the same run. It also
+  outlives the run, within the chat it arrived in: tool results are part of
+  that chat's history, which later turns replay to their nodes, and of the
+  summary *Compress long chat history* folds that history into.
+- Three more sources reach the model the same way without being tool results,
+  and are untrusted in the same sense: text **shared into the app from another
+  app**, which becomes the run's prompt (the *Original Task*) and is recorded
+  as the user's own message; an MCP server's **tool catalogue** — names and
+  descriptions, rendered into `$TOOLS` on every run whether or not the server
+  is called; and an **imported memory file**, whose text reaches every node
+  that reads long-term memory. An import never pins a chunk and never dates
+  one later than the import itself — a pinned chunk skips the relevance
+  threshold and compaction, and a future date would keep a chunk first in
+  `$MEMORY_SUMMARY` — and the import dialog says how many pins the file
+  carried.
+- An **imported chat** is untrusted the same way: its messages become the
+  chat's history, which later turns replay to their nodes. The file decides
+  each message's role and date, so the import keeps only user and assistant
+  turns (a file's system rows would pass for the app's own notices), dates
+  none later than the import, marks every message imported, and writes the
+  whole file in one transaction or nothing.
+- **Tool output does not reach long-term memory through auto-extract.** The
+  extraction pass reads the user's messages and the assistant's replies only —
+  never a tool result, a refusal note, a run-outcome line or a message
+  imported from a chat file. A reply no model wrote is not read either: an
+  Output node in echo mode saves the text it was handed as the reply, so behind
+  a Tool node that is the tool's result verbatim. The engine records whether a
+  model wrote the text a run carries (a tool's result and the user's prompt
+  count as not, pass-through nodes keep what they received), and marks such a
+  reply relayed. The transcripts
+  and lists the app assembles for a model — the extraction and history
+  compression transcripts, a node's chat history, memory and tool-result
+  lists, and the memory and tool lists a system prompt or a tool choice is
+  given (`$MEMORY_SUMMARY`, `$TOOLS`, a TOOL or SKILL node's catalogue) —
+  indent each continuation line of an entry, so an entry cannot open a line of
+  its own: a tool result there cannot write a line that reads as a user turn,
+  another entry, or a context-block header, and neither can a memory chunk or
+  a server's tool description. The payload a node acts on (*Previous Node
+  Output*, often a raw tool result) and the *Original Task* are passed as
+  written, except that a tool's result is cut to the single-read budget for a
+  node on the on-device model.
+  What remains: the assistant's replies are read, and a reply can repeat what a
+  tool returned, so an injection that gets the model to restate it in its
+  answer can still reach the extractor, whose prompt tells the model to ignore
+  the assistant's own statements. Two other paths put untrusted text into
+  memory by design: `delegate_task` stores the cloud model's answer (it is
+  `SENSITIVE`, so it asks under the default policy), and text the user did not
+  type is read as the user's message — shared text, a `schedule_task`
+  instruction the model composed (`SENSITIVE`, and the approval card shows it),
+  and an external-automation request.
 - **AppFunctions exposed by other installed apps are not on that list**, and
   the omission is deliberate rather than an oversight. Calling another app's
   AppFunction needs `EXECUTE_APP_FUNCTIONS`, which Android 16 grants to
@@ -446,17 +698,36 @@ oversight — and it works as follows:
   functions it publishes are an inbound entry surface rather than a source of
   tool content; they are covered by *Automation triggers and entry surfaces*
   above.
-- The backstop is the **human-in-the-loop gate**: before any `SENSITIVE` or
+- The backstop is the **human-in-the-loop gate**: before a `SENSITIVE` or
   `DESTRUCTIVE` tool executes, the chat surfaces a confirmation card showing
   the **tool name and the exact arguments** the model produced, and the run
   suspends until the user approves or denies. An injected instruction can
-  therefore *propose* a harmful call, but cannot *execute* it unreviewed.
+  therefore *propose* a harmful call, but cannot *execute* it unreviewed. That
+  holds under the default approval policy. Setting *Approve tool calls* to
+  *Never* removes the card for `SENSITIVE` tools — writing a workspace file,
+  delegating to a cloud model, an `http_request` `GET` — so under it an
+  injection can make those run unreviewed; a `DESTRUCTIVE` tool asks under
+  every policy.
 - `READ_ONLY` tools are **not gated by design** — prompting on every lookup
   would make the agent unusable. The residual exposure is that injected
   content can shape further read-only queries and the text of the final
   answer.
 - Tools without a known risk level (all MCP-provided tools included) default
-  to `SENSITIVE`, the conservative fallback, so they always hit the gate.
+  to `SENSITIVE`, the conservative fallback, so they hit the gate unless
+  *Approve tool calls* is set to *Never*.
+- **An MCP tool cannot borrow another tool's name, or another server's
+  decision.** A server tool with the name of a built-in tool or a discovered
+  AppFunction is not offered to the agent at all — the call by that name runs
+  the device tool, under the device tool's risk. When two servers publish the
+  same name, only the first in the user's order that has it switched on serves
+  it: the catalogue entry, the per-server risk decision and the call all come
+  from that server, and a call that fails there is not retried on another. The
+  risk is re-checked against the serving server just before the call, which is
+  refused if a reconnect handed the name to a server with a different decision
+  after the gate asked. An approval recorded on a run that waited in the
+  background applies only to the call it was given for — the same arguments at
+  the same risk; if the resumed run resolves differently, the user is asked
+  again. The Tools screen marks a server tool that is not offered.
 
 **Recommendation:** when connecting an MCP server you do not fully trust —
 or one that serves content from the open web — set the tool-approval policy
@@ -484,18 +755,31 @@ The defences are layered so that no single one has to be perfect:
 - **Exact-host matching, no implied sub-domains.** Matching is exact and
   case-insensitive: adding `example.com` does not authorise `api.example.com`.
   An injection cannot widen the user's grant by guessing a neighbouring host.
-- **Human-in-the-loop on every call, by method.** Risk is resolved per
-  request through `HttpRequestPolicy`: a `GET` is `SENSITIVE` and a
-  `POST`/`PUT`/`DELETE` is `DESTRUCTIVE`, so every `http_request` passes the
-  HITL gate. The confirmation card shows the model-produced **URL and
-  arguments**, so a user who is paying attention sees the destination before
-  the data leaves the device. An unparsable call falls back to the strictest
-  risk.
-- **Stored-credential filter.** Before a request is sent, its URL, headers,
-  and body are scanned for any saved cloud-provider API key (OpenAI,
-  Anthropic, Google, DeepSeek). If a request would carry one, it is refused
-  outright — a saved key can never be exfiltrated through this tool, even with
-  user approval.
+- **Human-in-the-loop, by method.** Risk is resolved per request through
+  `HttpRequestPolicy`: a `GET` is `SENSITIVE` and a `POST`/`PUT`/`DELETE` is
+  `DESTRUCTIVE`. A `POST`/`PUT`/`DELETE` passes the HITL gate under every
+  approval policy; a `GET` passes it unless *Approve tool calls* is set to
+  *Never*, which leaves a `GET` — a request that can still carry data out in
+  its query string — with the allowlist as its only control. The confirmation
+  card shows the model-produced **URL and arguments**, so a user who is paying
+  attention sees the destination before the data leaves the device. An
+  unparsable call falls back to the strictest risk.
+- **Stored-credential filter.** Before a request is sent, its URL, header
+  names and values, and body are scanned for any saved cloud-provider API key
+  (OpenAI, Anthropic, Google, DeepSeek) — the URL and the body also
+  percent-decoded. A request carrying one as written is refused outright, even
+  with user approval. It is a substring filter, and it promises what one can:
+  a key the model splits across fields or encodes some other way is not
+  recognised, so a key the model has seen is protected by the gate and the
+  allowlist, not by this filter alone.
+- **Headers the transport owns are refused.** `Host`, `Content-Length`,
+  `Transfer-Encoding`, `Connection` and their kind are set from the URL and the
+  body, never from the model's arguments: a `Host` header would choose the
+  virtual host behind an allowlisted address, which the allowlist never saw.
+- **Every call has a deadline and ends with the run.** One hop may take at
+  most 60 seconds from connecting to the last byte of the body, and stopping
+  the run cancels a call in flight — a response that keeps trickling can no
+  longer hold the run, *Stop*, or the chats queued behind it.
 - **Redirect re-validation.** Automatic redirects are disabled; each hop is
   re-validated against the same allowlist (a redirect that points outside it
   aborts the request), the chain is capped, and credential headers are
@@ -505,15 +789,32 @@ The defences are layered so that no single one has to be perfect:
   permitted only for loopback / private-LAN addresses written as plain decimal
   IPv4 literals (the same rule the app applies to a local Ollama or MCP server;
   the platform network-security config permits cleartext app-wide, because it
-  cannot express "any private address").
+  cannot express "any private address"). The shared client that model
+  downloads and discovery use enforces the same floor on **every hop**,
+  including redirects it follows itself.
 
 The residual risk is the honest one: a user who has **deliberately added a
 host to the allowlist** and then **approves** a `SENSITIVE`/`DESTRUCTIVE`
-`http_request` to it can still send workspace data to that host — the tool is
+`http_request` to it — or has set *Approve tool calls* to *Never*, so a `GET`
+needs no approval — can still send workspace data to that host — the tool is
 doing exactly what the user authorised. The allowlist and the HITL gate make
 that an explicit, reviewable decision rather than a silent capability, which
 is the design goal; they do not (and cannot) override a user who chooses to
 trust a destination. The Files screen warns about this when adding a domain.
+
+### Build and release integrity
+
+Published APKs are built and signed by the release workflow, in the same job
+that decodes the signing key. What that job executes is pinned: every GitHub
+Action by commit SHA, the Gradle distribution by checksum, and every dependency
+by its publisher's signing key or, where there is no signature, by checksum
+(`gradle/verification-metadata.xml`). The build runs on the JDK the workflow
+installs rather than one Gradle downloads. A change to what the shipped manifest
+declares — a permission, an exported component, a package-visibility entry —
+fails the build until someone records it, so a library cannot add one unnoticed.
+Every commit under review is scanned for secrets. How each guard works, and what
+it does not cover: [`docs/static-analysis.md`](docs/static-analysis.md)
+§ *Supply chain*.
 
 ### Out of scope
 
@@ -545,10 +846,13 @@ Crash reporting is **opt-in and disabled by default** — and entirely absent
 from the FOSS build:
 
 - **The `foss` (F-Droid) build has no crash reporting at all.** It ships no
-  Firebase/Google dependency, binds a no-op crash reporter that records and
-  transmits nothing, and hides the consent toggle. The controls below apply to
-  the `full` distribution only. See [docs/release.md](docs/release.md) §
-  *FOSS / F-Droid build*.
+  crash-reporting or analytics SDK, binds a no-op crash reporter that records
+  and transmits nothing, and hides the consent toggle. The on-device embedding
+  library does bring Google's data-transport libraries into both builds; `foss`
+  removes the components that could send anything (see
+  [docs/release.md](docs/release.md) § *Known residuals*). The controls below
+  apply to the `full` distribution only. See
+  [docs/release.md](docs/release.md) § *FOSS / F-Droid build*.
 - The `full` flavour's `AndroidManifest.xml` overlay sets both
   `firebase_crashlytics_collection_enabled` and
   `firebase_analytics_collection_enabled` to `false`, which disables Firebase
@@ -566,12 +870,19 @@ When (and only when) a user has explicitly opted in on a release build, the
 following information may be transmitted to Firebase Crashlytics:
 
 - Stack traces for fatal crashes and non-fatal `Log.WARN` / `Log.ERROR`
-  records captured by Timber.
+  records captured by Timber. A non-fatal record carries the error's type,
+  its stack frames and the fixed text written at the logging call — not the
+  error's own message, nor any value the call fills in (a file path, a tool
+  argument): those are where user data travels, so they are dropped before
+  the record leaves the app.
 - Device model and Android OS version.
 - App version and build identifier.
 - Two custom keys set by the pipeline engine: `active_pipeline_id` and
   `active_model` (the identifier of the pipeline and the model in use when
   the event occurred).
+- The random installation identifier Crashlytics creates to count affected
+  installations, and the Firebase installation ID it is rotated with. Neither is
+  derived from the user or the device hardware; both change on reinstall.
 
 The following are **never** transmitted off-device, even with crash reporting
 enabled:
@@ -580,7 +891,9 @@ enabled:
 - Long-term memory chunks or any user-authored text.
 - Tool inputs, tool outputs, or arguments produced by the agent.
 - API keys, passphrases, or any value stored in the Keystore-backed
-  encrypted stores.
+  encrypted stores. A key quoted inside an error message — Google puts it in
+  the request URL — cannot reach a non-fatal record, which carries no error
+  message at all.
 - Personally identifying information beyond the device/app metadata listed
   above.
 

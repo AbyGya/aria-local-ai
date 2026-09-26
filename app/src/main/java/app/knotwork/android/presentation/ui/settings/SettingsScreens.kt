@@ -7,7 +7,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -17,6 +16,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -27,11 +27,13 @@ import app.knotwork.android.domain.models.EntrySurface
 import app.knotwork.android.domain.models.MemoryImportStrategy
 import app.knotwork.android.domain.models.ProviderId
 import app.knotwork.android.domain.models.ToolApprovalPolicy
+import app.knotwork.android.domain.text.toDisplaySafe
 import app.knotwork.android.presentation.tile.requestAddDutyTile
 import app.knotwork.android.presentation.ui.common.openDocumentation
 import app.knotwork.design.components.dialogs.SingleChoiceDialog
 import app.knotwork.design.components.dialogs.SingleChoiceDialogUi
 import app.knotwork.design.components.dialogs.SingleChoiceOptionUi
+import app.knotwork.design.components.misc.KnotworkSnackbarHost
 import app.knotwork.design.screens.automation.ExternalAutomationConsentContent
 import app.knotwork.design.screens.automation.ExternalAutomationConsentStrings
 import app.knotwork.design.screens.settings.AboutSettingsContent
@@ -413,7 +415,8 @@ private fun SettingsSurface(viewModel: SettingsViewModel, content: @Composable (
     CompositionLocalProvider(LocalSettingsHints provides hints) {
         Box(modifier = Modifier.fillMaxSize()) {
             content()
-            SnackbarHost(hostState = snackbarHostState)
+            // Bottom centre: unaligned, a Box child sits at the top-left, over the top bar.
+            KnotworkSnackbarHost(hostState = snackbarHostState, modifier = Modifier.align(Alignment.BottomCenter))
         }
     }
 }
@@ -580,11 +583,11 @@ private fun ApproveToolCallsOption.toPolicy(): ToolApprovalPolicy = when (this) 
 }
 
 /**
- * `:app` binding of the catalog's memory-import dialog: resolves the copy and
- * decides which mismatch warnings apply to the parsed document.
+ * `:app` binding of the catalog's memory-import dialog: resolves the copy of the
+ * body and of each warning the staged document raises.
  *
- * Which warnings apply is a judgement about the import, so it is made here; the
- * catalog receives finished sentences.
+ * Which warnings apply is decided by [PendingMemoryImport.warnings]; this binding
+ * turns each into its sentence, and the catalog receives finished sentences.
  *
  * @param pending The parsed document awaiting a strategy.
  * @param onMerge Keep existing entries, skip duplicate ids.
@@ -602,14 +605,17 @@ private fun MemoryImportDialog(
         ui = MemoryImportDialogUi(
             title = stringResource(R.string.settings_memory_import_dialog_title),
             body = stringResource(R.string.settings_memory_import_dialog_body, pending.document.chunks.size),
-            warnings = buildList {
-                if (pending.schemaMismatch) add(stringResource(R.string.settings_memory_import_schema_warning))
-                if (pending.providerMismatch) {
-                    add(
-                        stringResource(
-                            R.string.settings_memory_import_provider_warning,
-                            pending.document.embeddingProviderId,
-                        ),
+            warnings = pending.warnings.map { warning ->
+                when (warning) {
+                    MemoryImportWarning.SchemaMismatch -> stringResource(R.string.settings_memory_import_schema_warning)
+                    MemoryImportWarning.ProviderMismatch -> stringResource(
+                        R.string.settings_memory_import_provider_warning,
+                        // Taken from the file as written: quoted, so display-safe.
+                        pending.document.embeddingProviderId.toDisplaySafe(),
+                    )
+                    MemoryImportWarning.PinsNotImported -> stringResource(
+                        R.string.settings_memory_import_pins_warning,
+                        pending.document.pinnedInFile,
                     )
                 }
             },

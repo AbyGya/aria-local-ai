@@ -1,8 +1,10 @@
 package app.knotwork.android.domain.usecases
 
 import app.knotwork.android.domain.models.ImportCollisionResolution
+import app.knotwork.android.domain.models.PipelineCollision
 import app.knotwork.android.domain.models.PipelineGraph
 import app.knotwork.android.domain.models.PipelineImportOutcome
+import app.knotwork.android.domain.pipelineio.ImportedPipelineClaims
 import app.knotwork.android.domain.pipelineio.PipelineBundleIdRemapper
 import app.knotwork.android.domain.pipelineio.PipelineJsonSerializer
 import app.knotwork.android.domain.repositories.PipelineRepository
@@ -17,9 +19,11 @@ import javax.inject.Inject
  *
  * 1. The JSON is parsed by [PipelineJsonSerializer.parse], which surfaces
  *    one of [PipelineImportOutcome.Success] / [PipelineImportOutcome.SchemaMismatch]
- *    / [PipelineImportOutcome.Failure].
+ *    / [PipelineImportOutcome.Failure]; what the file claims about itself is
+ *    then checked against its graph ([ImportedPipelineClaims]).
  * 2. On a clean [PipelineImportOutcome.Success] this use case checks whether
- *    the imported graph's id already names a saved pipeline. If it does **not**,
+ *    the imported graph's id is already taken — it names a saved pipeline, or a
+ *    deleted pipeline's bindings still name it. If it is **not**,
  *    the graph is persisted immediately through [SavePipelineUseCase]. If it
  *    **does**, nothing is written — [ImportInvocation.pendingCollision] carries
  *    the graph so the UI can prompt the user (Replace / Import as copy /
@@ -27,6 +31,20 @@ import javax.inject.Inject
  *    silent-overwrite behaviour where a colliding id clobbered the existing
  *    pipeline without warning. On [PipelineImportOutcome.SchemaMismatch] we
  *    still defer to [persistConfirmed] after the compatibility warning.
+ *
+ * **A collision is described by the pipeline already there.** The prompt is
+ * built from a [PipelineCollision]: the library pipeline's own name (the
+ * file's `name` is its author's to choose, and naming it made the prompt claim
+ * the library held a pipeline it did not) and everything bound to the shared
+ * id ([FindPipelineBindingsUseCase]). Replace keeps the id on purpose, so the
+ * default-pipeline setting, entry surfaces, triggers, chats and calling
+ * pipelines all run the imported graph afterwards — the prompt lists them so
+ * the user agrees to that knowingly.
+ *
+ * **Every save reports the graph it wrote.** Node and connection ids are
+ * freshened before saving (below), so the graph in storage differs from the
+ * parsed one; the editor must continue from the stored one, or its next Save
+ * writes the file's ids again and reopens the hole the freshening closes.
  *
  * Splitting parse from persist keeps the use case testable without a
  * fake `Activity` and lets the UI display a confirm-dialog before any
@@ -47,6 +65,7 @@ import javax.inject.Inject
 class ImportPipelineUseCase @Inject constructor(
     private val savePipelineUseCase: SavePipelineUseCase,
     private val pipelineRepository: PipelineRepository,
+    private val findPipelineBindings: FindPipelineBindingsUseCase,
 ) {
 
     /**
@@ -62,16 +81,22 @@ class ImportPipelineUseCase @Inject constructor(
      * @return the [ImportInvocation] the UI should render.
      */
     suspend operator fun invoke(jsonText: String): ImportInvocation {
-        val outcome = PipelineJsonSerializer.parse(jsonText)
+        // Checked once, here, so every later step — the collision prompt, the
+        // mismatch confirmation, both resolutions — works on the checked graph.
+        val outcome = when (val parsed = PipelineJsonSerializer.parse(jsonText)) {
+            is PipelineImportOutcome.Success -> parsed.copy(graph = ImportedPipelineClaims.checked(parsed.graph))
+            is PipelineImportOutcome.SchemaMismatch -> parsed.copy(graph = ImportedPipelineClaims.checked(parsed.graph))
+            is PipelineImportOutcome.Failure -> parsed
+        }
         if (outcome !is PipelineImportOutcome.Success) {
             return ImportInvocation(outcome = outcome, saveResult = null)
         }
 
-        val collides = pipelineRepository.getPipelineById(outcome.graph.id) != null
-        return if (collides) {
-            ImportInvocation(outcome = outcome, saveResult = null, pendingCollision = outcome.graph)
+        val collision = collisionOf(outcome.graph)
+        return if (collision != null) {
+            ImportInvocation(outcome = outcome, saveResult = null, pendingCollision = collision)
         } else {
-            ImportInvocation(outcome = outcome, saveResult = savePipelineUseCase(freshenElementIds(outcome.graph)))
+            ImportInvocation(outcome = outcome, saveResult = save(freshenElementIds(outcome.graph)))
         }
     }
 
@@ -84,14 +109,16 @@ class ImportPipelineUseCase @Inject constructor(
      *
      * @param outcome The schema-mismatch outcome the user confirmed.
      * @return [ConfirmedImport.Saved] with the save result when the id is free,
-     *   or [ConfirmedImport.Collision] carrying the graph when it collides.
+     *   or [ConfirmedImport.Collision] describing the collision when it is not.
      */
-    suspend fun persistConfirmed(outcome: PipelineImportOutcome.SchemaMismatch): ConfirmedImport =
-        if (pipelineRepository.getPipelineById(outcome.graph.id) != null) {
-            ConfirmedImport.Collision(outcome.graph)
+    suspend fun persistConfirmed(outcome: PipelineImportOutcome.SchemaMismatch): ConfirmedImport {
+        val collision = collisionOf(outcome.graph)
+        return if (collision != null) {
+            ConfirmedImport.Collision(collision)
         } else {
-            ConfirmedImport.Saved(savePipelineUseCase(freshenElementIds(outcome.graph)))
+            ConfirmedImport.Saved(save(freshenElementIds(outcome.graph)))
         }
+    }
 
     /**
      * Persists [graph] after the user has resolved an id collision.
@@ -106,17 +133,42 @@ class ImportPipelineUseCase @Inject constructor(
      * a fresh pipeline (references to *other* library pipelines are preserved,
      * since a single import carries no intra-bundle targets to remap).
      *
-     * @param graph The graph captured in [ImportInvocation.pendingCollision].
+     * @param graph The imported graph of [ImportInvocation.pendingCollision].
      * @param resolution The user's choice.
-     * @return The [Result] of the save attempt.
+     * @return The graph as written, or the save's failure.
      */
-    suspend fun persistWithResolution(graph: PipelineGraph, resolution: ImportCollisionResolution): Result<Unit> {
+    suspend fun persistWithResolution(
+        graph: PipelineGraph,
+        resolution: ImportCollisionResolution,
+    ): Result<PipelineGraph> {
         val toSave = when (resolution) {
             ImportCollisionResolution.REPLACE -> freshenElementIds(graph)
             ImportCollisionResolution.IMPORT_AS_COPY ->
                 PipelineBundleIdRemapper.regenerate(listOf(graph)) { UUID.randomUUID().toString() }.first()
         }
-        return savePipelineUseCase(toSave)
+        return save(toSave)
+    }
+
+    /** Saves [graph] and, on success, returns it — the graph now in storage. */
+    private suspend fun save(graph: PipelineGraph): Result<PipelineGraph> = savePipelineUseCase(graph).map { graph }
+
+    /**
+     * Describes what [incoming]'s id is already taken by, if anything: a library
+     * pipeline, or bindings left behind by a deleted one. A deleted pipeline's id
+     * is free in the library, but its chats, triggers and callers still name it;
+     * saving under it without asking would re-bind all of them to the file.
+     *
+     * @param incoming The checked imported graph.
+     * @return The collision to confirm, or `null` when the id is free of both.
+     */
+    private suspend fun collisionOf(incoming: PipelineGraph): PipelineCollision? {
+        val existing = pipelineRepository.getPipelineById(incoming.id)
+        val bindings = findPipelineBindings.of(incoming.id)
+        return when {
+            existing != null -> PipelineCollision(incoming, existing.name, bindings)
+            !bindings.isEmpty -> PipelineCollision(incoming, existingName = null, bindings = bindings)
+            else -> null
+        }
     }
 
     /**
@@ -138,17 +190,18 @@ sealed class ConfirmedImport {
     /**
      * The confirmed graph's id was free, so it was persisted.
      *
-     * @property result The save attempt's result.
+     * @property result The graph as written, or the save's failure.
      */
-    data class Saved(val result: Result<Unit>) : ConfirmedImport()
+    data class Saved(val result: Result<PipelineGraph>) : ConfirmedImport()
 
     /**
      * The confirmed graph's id collides with an existing pipeline; nothing was
      * written. The UI must resolve the collision (Replace / Import as copy).
      *
-     * @property graph The parsed graph awaiting collision resolution.
+     * @property collision The existing pipeline and its bindings, plus the
+     *   graph awaiting resolution.
      */
-    data class Collision(val graph: PipelineGraph) : ConfirmedImport()
+    data class Collision(val collision: PipelineCollision) : ConfirmedImport()
 }
 
 /**
@@ -161,20 +214,20 @@ data class ImportInvocation(
     /** Parse outcome — drives the UI branching (Success / SchemaMismatch / Failure). */
     val outcome: PipelineImportOutcome,
     /**
-     * Persistence result; non-null only for outcomes that the use case persisted
-     * automatically (i.e. a clean [PipelineImportOutcome.Success] whose id did
-     * not collide). For [PipelineImportOutcome.SchemaMismatch] persistence is
+     * Persistence result — the graph as written, freshened ids included —
+     * non-null only for outcomes that the use case persisted automatically (a
+     * clean [PipelineImportOutcome.Success] whose id did not collide). For [PipelineImportOutcome.SchemaMismatch] persistence is
      * deferred to `persistConfirmed`, for a colliding success it is deferred to
      * `persistWithResolution`, and for [PipelineImportOutcome.Failure] it never
      * runs.
      */
-    val saveResult: Result<Unit>?,
+    val saveResult: Result<PipelineGraph>?,
     /**
      * Set only when the parse succeeded cleanly but the graph's id already
-     * names a saved pipeline. The UI must prompt the user for a collision
-     * resolution and then call
+     * names a saved pipeline. The UI must prompt the user — naming the
+     * existing pipeline and its bindings — and then call
      * [ImportPipelineUseCase.persistWithResolution]; nothing has been written
      * yet.
      */
-    val pendingCollision: PipelineGraph? = null,
+    val pendingCollision: PipelineCollision? = null,
 )

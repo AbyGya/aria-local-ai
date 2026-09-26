@@ -179,6 +179,7 @@ class BackgroundAutonomyCycleIntegrationTest {
         coEvery { pipelineRepository.getPipelineById(GRAPH_ID) } returns graph
 
         settingsRepository = mockk()
+        every { settingsRepository.workspaceReadTokenBudget } returns flowOf(2_000)
         every { settingsRepository.verboseMemoryLoggingEnabled } returns flowOf(false)
         every { settingsRepository.chatHistoryCompressionEnabled } returns flowOf(false)
         every { settingsRepository.chatHistoryCompressionThresholdTokens } returns flowOf(3_500)
@@ -266,7 +267,7 @@ class BackgroundAutonomyCycleIntegrationTest {
                     processB.pendingRepository.getForRun(runId) != null
             }
             verify(atLeast = 1) {
-                processB.approvalNotifier.sendApprovalRequest(any(), any(), any(), any())
+                processB.approvalNotifier.sendApprovalRequest(any(), any(), any(), any(), any())
             }
             // The resumed engine executed the LLM step live (the interrupted
             // run never completed it) and its record is now part of the
@@ -283,7 +284,7 @@ class BackgroundAutonomyCycleIntegrationTest {
                 processB.taskQueueManager,
                 processB.pendingRepository,
                 processB.parkedRunResumer,
-            )(SESSION_ID, isApproved = true, runId = runId)
+            )(SESSION_ID, processB.parkedRequestId(runId), isApproved = true)
             assertEquals(PendingSubmissionOutcome.Resumed, outcome)
 
             awaitUntil("run COMPLETED", dump = { processB.stateOf(runId) }) {
@@ -447,8 +448,8 @@ class BackgroundAutonomyCycleIntegrationTest {
             pipelineRunRepository = runRepository,
             runTraceRepository = traceRepository,
             attachmentStore = mockk(relaxed = true),
+            dispatcher = testDispatcher,
         ).apply {
-            dispatcher = testDispatcher
             // The no-progress valve is disabled here: this harness advances a
             // virtual clock while the run really progresses on `Dispatchers.IO`
             // threads the scheduler cannot see, so the window would elapse on a
@@ -563,7 +564,17 @@ class BackgroundAutonomyCycleIntegrationTest {
         val approvalNotifier: ApprovalNotifier,
         val resumeRun: ResumePipelineRunUseCase,
         val parkedRunResumer: ParkedRunResumer,
-    )
+    ) {
+        /**
+         * Identity of the request run [runId] is parked on — what the buttons
+         * of its notification answer with.
+         *
+         * @param runId The parked run.
+         * @return The request id its record carries.
+         */
+        suspend fun parkedRequestId(runId: String): String =
+            requireNotNull(pendingRepository.getForRun(runId)?.requestId) { "run $runId parks no approval request" }
+    }
 
     private companion object {
         const val GRAPH_ID = "cycle-graph"

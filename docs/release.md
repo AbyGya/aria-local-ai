@@ -42,6 +42,20 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 ./gradlew :app:bundleFullRelease
 ```
 
+A release build needs the Android NDK named by `ndk` in
+`gradle/libs.versions.toml` (today `28.2.13676358`). The app compiles no native
+code, but that NDK's `llvm-strip` strips the prebuilt native libraries it
+packages. Without it, AGP would ship them unstripped and say so only in an
+informational line — a different artefact from the one CI publishes. So
+`verify<Variant>PinnedNdk` fails the release build instead, and its message
+names the command that installs the pinned version:
+
+```bash
+sdkmanager "ndk;<version>"
+```
+
+Debug builds and `./gradlew check` do not need it.
+
 Outputs (the flavour name is part of the path):
 
 - `app/build/outputs/apk/full/release/app-full-release.apk`
@@ -85,6 +99,15 @@ release artefact — configuration never fails for the lack of a key. The
 credential values are never committed: `.gitignore` blocks every keystore
 extension (`*.jks` / `*.keystore` / `*.p12` …) plus `local.properties`,
 `keystore.properties`, and `secrets.properties`.
+
+The `release` signing config signs every APK with **APK Signature Scheme v2
+and v3** (v1 is unnecessary at this `minSdk`). Both are set explicitly: with
+v3 on, AGP drops v2 at `minSdk` 28 and above unless asked to keep it, and every
+earlier release was signed with v2 alone. v3 is the scheme a signing-key
+rotation is expressed in. What it does not do is make a key recoverable: a
+rotation is signed by the old key, so a **lost** key still cannot be replaced
+without every user uninstalling. Keeping the key safe is the only protection
+against that.
 
 ### Current distribution state
 
@@ -222,6 +245,36 @@ rather than discovering the wrong signer at the end of it.
 The `check.yml` gate does **not** build release artefacts and needs none of
 these secrets.
 
+### The Firebase project behind the `full` build
+
+The published `full` APK carries the Firebase project's API key and project id.
+That is how Firebase works — the key identifies the project and is not a secret —
+but it makes the key's restrictions and the products enabled on the project part
+of what the app exposes, and neither lives in this repository. They are checked
+in the Google Cloud and Firebase consoles before a release (§9) and whenever the
+signing setup changes:
+
+- **API restrictions.** The Android key allows only the APIs the app calls. Crash
+  reporting needs the *Firebase Installations API* alone.
+- **Application restrictions.** *Android apps*, with the package paired with
+  **both** signing certificates' SHA-1: the Play App Signing key (Play Console →
+  *Setup* → *App signing*) and the release key that signs the GitHub APK (step 2
+  above, SHA-1 rather than SHA-256). With one pair missing, crash reporting stops
+  working on that channel and nothing else says so. Debug builds use the
+  committed placeholder file and are not affected.
+- **Enabled products.** Nothing beyond Crashlytics.
+- **No other keys.** Firebase creates a *Browser key* with the project, for web
+  apps; this project has none, so the key is unused and has been deleted. The
+  key in the APK is the Android key (compare its first characters with the one
+  in `google-services.json`). A deleted key can be restored from the Credentials
+  page for 30 days.
+- **Verify after any change.** With crash reporting on, both a Play install and a
+  GitHub APK produce successful (2xx) requests on the Firebase Installations
+  API's metrics page in the Cloud console; a 403 means a pair is missing.
+
+The values themselves — the key, the certificates' fingerprints, the project id —
+are not recorded here.
+
 ### Verifying the signature
 
 `release.yml` verifies every artefact it publishes and fails the release on a
@@ -231,9 +284,13 @@ artefact or for auditing something already downloaded.
 For an APK, use `apksigner` from the Android SDK build-tools:
 
 ```bash
-apksigner verify --print-certs --verbose \
+apksigner verify --print-certs --verbose --min-sdk-version 24 \
     app/build/outputs/apk/full/release/app-full-release.apk
 ```
+
+Expect `Verified using v2 scheme … true` and `Verified using v3 scheme … true`.
+Keep `--min-sdk-version 24`: at the app's own `minSdk`, `apksigner` verifies the
+v3 signature alone and reports v2 as not verified even when it is there.
 
 An AAB carries only a v1 (JAR) signature, which `apksigner` does not read;
 `keytool` prints the signer certificate of a signed JAR directly:
@@ -263,14 +320,15 @@ short version:
 | SQLCipher                | `net.zetetic:sqlcipher-android` loads its `.so` by reflection. |
 | Koog                     | Heavy reflection over node / tool / pipeline graph definitions.|
 | Ktor                     | Transitive HTTP layer underneath every Koog cloud client.     |
-| AppFunctions             | `*_AppFunctionInventory` / `*_AppFunctionInvoker` KSP outputs are loaded by `androidx.appfunctions` via reflection. |
+| AppFunctions             | The library's package is kept whole. What the platform loads by name is the pair of aggregated KSP classes, which the library's own rules keep too; the per-function inventory and invoker are reached by ordinary calls and may be renamed. |
 | Hilt                     | Aggregated component classes occasionally over-shrunk on full mode. |
 | Room                     | `*_Impl` DAOs / database instantiated reflectively.           |
-| OpenTelemetry incubator  | Optional symbols referenced from Koog's OTel logging plumbing — kept under `-dontwarn` since the runtime path is never hit. |
 
 If R8 starts stripping something at runtime, drop a new section into
 `proguard-rules.pro` rather than scattering rules across the file, and
-include a one-line comment on the symptom that triggered the keep.
+include a one-line comment on the symptom that triggered the keep. Every name
+in a rule must exist: R8 matches a wrong name with nothing and says nothing,
+so `verify<Variant>KeepRuleTargets` (§7) fails the build on one.
 
 ## 5. APK size breakdown
 
@@ -312,6 +370,20 @@ What we already did to keep this in check:
 - **arm64-v8a only.** Other ABIs would more than double the artefact.
 - **R8 full mode + resource shrinking.** Saves ~2 MB on DEX vs. unminified.
 - **Strip Jansi non-Android natives.** `org/fusesource/jansi/internal/native/{Windows,Mac,Linux,FreeBSD}/**` and `META-INF/native-image/jansi/**` are dropped via the `android.packaging.resources` exclude list — Jansi ships through Koog's logger and only its ANSI-escape rendering runs on JVM hosts.
+- **Leave Koog's telemetry out.** The `koog-agents` umbrella brings Koog's OpenTelemetry feature
+  and the OpenTelemetry SDK — exporters for Langfuse, W&B Weave, Datadog and any OTLP endpoint.
+  The app builds no Koog agent, so none of it was reachable, and every configuration now excludes
+  it (`configurations.configureEach` in `app/build.gradle.kts`). Measured on 25 September 2026 on
+  local release builds: 445,652 bytes off the `full` APK and 429,272 off `foss`, no
+  OpenTelemetry class left in the R8 mapping, and no exporter endpoint in the dex. Before the
+  exclusion, a scan of every class on both release runtime classpaths (88,988 classes in 487 jars)
+  found no reference to OpenTelemetry or to that Koog module outside the module itself, so nothing
+  that stays can reach for what left.
+- **Leave SLF4J's simple provider out.** Koog's Android client brings `slf4j-simple`
+  in at runtime, which wrote library logging — model output among Koog's lines — to
+  logcat. Every configuration excludes it; with no provider SLF4J 2 uses its no-op
+  logger, and `verify<Variant>NoSlf4jProvider` keeps any other provider out
+  ([static analysis](static-analysis.md)). Four classes fewer in the release mapping.
 - **Drop MediaPipe's text-generation library.** `**/libmediapipe_tasks_textgenai_jni.so` is excluded via `android.packaging.jniLibs`. Only `TextSummarizer` and `TextProofreader` load it — the app uses `TextEmbedder`, which loads `libmediapipe_tasks_jni.so` — and text generation belongs to LiteRT-LM. An exclude is a file-name pattern that stops matching silently if the library is renamed, so the release workflow asserts it on the artefact (§9): the library absent, and the LiteRT-LM and MediaPipe Tasks libraries present.
 
 Future wins (left out of scope for now):
@@ -354,8 +426,14 @@ bundletool get-size total --apks=app.apks
   screenshot comparison (`:catalog:verifyRoborazziDebug`),
   `koverVerifyFullDebug` (coverage is measured on the representative `full`
   variant; the flavours share every measured source), and the documentation,
-  version and store-listing gates. The full list, with what each one guards, is
-  in [`static-analysis.md`](static-analysis.md).
+  version and store-listing gates, and the supply-chain gates — the actions and
+  the Gradle distribution pinned, and each release variant's merged manifest
+  matching its recorded entry surfaces. The full list, with what each one guards,
+  is in [`static-analysis.md`](static-analysis.md).
+- Every build, the release build included, verifies each dependency against
+  `gradle/verification-metadata.xml` before using it
+  ([`static-analysis.md`](static-analysis.md) § *Dependency verification*); a
+  release that bumps a dependency has to carry the metadata update with it.
 - `:buildSrc:test` runs the tests of the build logic behind those gates. It is a
   separate build, so `check` cannot reach it.
 - `lintFullRelease` re-runs lint on the release configuration (catches issues
@@ -374,12 +452,24 @@ lint through `lintVital<Variant>Release`, which AGP wires into every release
 assemble. That is the fatal-severity subset of `lintFullRelease`, so running the
 command above before tagging still buys something the release pipeline does not.
 
-### Two guards on the minified artefact
+### Guards on the minified artefact
 
 `./gradlew check` never runs R8's output, so a release-only defect has exactly
-one place left to be caught: the artefact itself. Two tasks run after release
-packaging, and they check different properties — the second exists because the
-first was green while the app was broken.
+one place left to be caught: the release build itself. Two tasks run before R8
+and the strip step, three after packaging, and each checks a property the others
+cannot see. Before R8 and the strip step:
+
+- **`verify<Variant>KeepRuleTargets`** runs before R8 and resolves every class,
+  annotation and package named in `app/proguard-rules.pro` against the classes R8
+  is about to read (the variant's classes over every scope, plus the SDK boot
+  classpath). R8 matches a wrong name with nothing and prints nothing: four
+  AppFunctions rules and one LiteRT rule protected nothing for as long as they
+  existed. `-dontwarn` is not checked — naming absent classes is its purpose.
+- **`verify<Variant>PinnedNdk`** runs before the native libraries are stripped
+  and fails when the NDK pinned in the version catalog is not installed (§2).
+
+After packaging — the second of these exists because the first was green while
+the app was broken:
 
 - **`verify<Variant>KeepRules`** reads the R8 mapping and asserts that protected
   packages stayed identity-mapped. It catches a keep rule that stopped pinning
@@ -387,18 +477,34 @@ first was green while the app was broken.
   stack walk.
 - **`verify<Variant>Instantiable`** opens the packaged APK, parses the dex
   `class_defs` table and asserts that classes the app instantiates reflectively
-  are present and carry neither `ACC_ABSTRACT` nor `ACC_INTERFACE`.
+  are present and carry neither `ACC_ABSTRACT` nor `ACC_INTERFACE`. Besides
+  protobuf, the list holds the two aggregated AppFunctions classes the platform
+  loads by name — kept today by the library's own rules, which its `proguard.txt`
+  plans to replace.
+- **`verify<Variant>NoMediaPipeTelemetry`** disassembles the packaged dex with the
+  SDK's `dexdump` and fails on any call to MediaPipe's `LoggingClient.logEvent`.
+  MediaPipe Tasks attaches a usage logger to every task it creates, which sends
+  the app id and version and the device's model, fingerprint, country and
+  carrier to Google's Firelog endpoint; `full` keeps the upload component for
+  Crashlytics. `-assumenosideeffects` in `proguard-rules.pro` removes the one call
+  site and leaves the declaration (MediaPipe is kept whole), so neither the
+  mapping nor the class table can show whether the removal happened — only the
+  instructions can. It fails too when the call-site class is missing, so it
+  cannot pass over nothing. Verified both ways on `fullRelease`: one call site
+  without the rules, none with them.
 
-The second was added after long-term memory turned out to have never worked in
-any released build. R8 in full mode left `com.google.protobuf.Any` with its own
-name — so the mapping check passed — and made the class **abstract**, because
-protobuf-javalite instantiates through `Unsafe.allocateInstance`, which R8
-cannot see. MediaPipe parses its task graph as a protobuf, so every
+The instantiability check was added after long-term memory turned out to have
+never worked in any released build. R8 in full mode left
+`com.google.protobuf.Any` with its own name — so the mapping check passed — and
+made the class **abstract**, because protobuf-javalite instantiates through
+`Unsafe.allocateInstance`, which R8 cannot see. MediaPipe parses its task graph
+as a protobuf, so every
 `TextEmbedder.createFromOptions` threw `InstantiationException`. The exception
 was caught and shown as a snackbar, so nothing reached logcat or Crashlytics.
 
 The lists live in `app/build.gradle.kts` (`r8ProtectedPackages`,
-`r8RequiredInstantiableClasses`); the checkers are unit-tested in `buildSrc`
+`r8RequiredInstantiableClasses`); the checkers — `KeepRuleTargets` and
+`PinnedNdk` included — are unit-tested in `buildSrc`
 (`./gradlew -p buildSrc test`). Both published versions, `0.7.1` and `0.7.2`,
 fail the instantiability check — it was verified against them before being
 trusted.
@@ -470,11 +576,18 @@ are inherent to the product, not to crash reporting, and are tracked separately:
   The same chain used to put three of Google's data-transport **components**
   into the FOSS manifest — an alarm receiver, a job service and a
   backend-discovery service, the only `com.google.*` entries in a manifest whose
-  build is described as carrying no Google dependency. Nothing could be sent
-  through them (R8 strips the transport implementation; no CCT endpoint survives
-  into the dex), but a manifest that advertises a collector invites exactly the
-  question the FOSS build exists to answer. They are removed in
-  `app/src/foss/AndroidManifest.xml` with `tools:node="remove"`.
+  build is described as carrying no Google dependency. They are removed in
+  `app/src/foss/AndroidManifest.xml` with `tools:node="remove"`, and those three
+  lines are the whole guarantee. The transport classes and the CCT endpoint
+  constant (`firebaselogging-pa.googleapis.com`) **do** remain in the `foss`
+  dex: `CctBackendFactory` carries `@androidx.annotation.Keep`, and it references
+  the destination that holds the endpoint. What keeps that code inert is the
+  manifest: without the discovery service no backend is found, and without the
+  scheduler components no upload can be scheduled. Because none of the three is
+  exported, the merged-manifest guard's entry list would not notice one coming
+  back; the `absent` lines in `config/merged-manifest/fossRelease.txt` do — they
+  fail `check` if any `com.google.android.datatransport`, `com.google.firebase`
+  or `com.google.android.gms` element appears in the `foss` merged manifest.
 
   **Removing the components rather than the dependency is deliberate.**
   Excluding `com.google.android.datatransport` from the `foss` configurations
@@ -521,8 +634,8 @@ user ever receives a copy of.
 
 ### Reproducible builds
 
-F-Droid prefers builds it can reproduce bit-for-bit from source. Both
-`BuildConfig` stamps are now deterministic for a given checkout:
+F-Droid prefers builds it can reproduce bit-for-bit from source. Three inputs
+of the build are properties of the commit rather than of the host:
 
 - `BuildConfig.GIT_COMMIT_DATE_EPOCH_MS` resolves, in order, from the
   `SOURCE_DATE_EPOCH` environment variable (the cross-ecosystem convention,
@@ -534,13 +647,26 @@ F-Droid prefers builds it can reproduce bit-for-bit from source. Both
   SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct) ./gradlew :app:assembleFossRelease
   ```
 
-- `BuildConfig.GIT_SHA` resolves the short commit SHA, which is deterministic
-  for a given checkout.
+- `BuildConfig.GIT_SHA` is the first eight characters of the full commit hash
+  (`GitCommitId` in `buildSrc`). It used to be `git rev-parse --short`, whose
+  length follows the clone rather than the commit: CI's depth-1 checkout printed
+  seven characters, a full clone of the same commit eight, and a `core.abbrev`
+  setting in someone's git configuration yet another length. The string is
+  compiled into `classes.dex`, so the dex differed with it.
+- The native libraries are stripped by the NDK pinned in
+  `gradle/libs.versions.toml` (§2). Left to AGP's default, a host without that
+  NDK packaged them unstripped — three of the five libraries then differed
+  between a local build and CI's of one commit. A release build now fails
+  instead, and an F-Droid recipe has to provide the same NDK.
+
+Measured on one commit: the `foss` APK that `release.yml` built from a depth-1
+checkout on Linux and one built from a full clone on macOS, with a different
+JDK vendor, have all 277 entries CRC-identical. Before these changes, the
+published 0.10.1 APK and a local build of its commit differed in 5 of 278
+entries (`classes.dex`, the baseline profile and three native libraries).
 
 What this does *not* establish is that the whole artefact reproduces
-bit-for-bit: that can only be confirmed against a build produced by F-Droid's
-own server, which does not exist yet. The claim here is narrow and true — the
-one identified source of non-determinism is gone.
+bit-for-bit on F-Droid's own server, which has not built it yet.
 
 The `foss` release is otherwise a standard R8-minified arm64-v8a build (§4); the
 F-Droid build recipe should disable any signing config so F-Droid applies its
@@ -660,7 +786,10 @@ same way merging a pull request is. Before pressing publish:
 
    A link that 404s here means the tag was not pushed, not that the registry is
    wrong.
-4. Publish.
+4. **Check the Firebase project behind the `full` build** (§3): key restrictions,
+   enabled products, and — after any change — successful requests from both
+   channels.
+5. Publish.
 
 **Dry-running the workflow.** *Actions* → *Release* → *Run workflow* takes a tag
 as input and performs every step except creating the release, so the pipeline

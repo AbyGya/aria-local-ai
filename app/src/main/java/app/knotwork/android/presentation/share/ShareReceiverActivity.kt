@@ -1,13 +1,13 @@
 package app.knotwork.android.presentation.share
 
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.core.content.IntentCompat
+import androidx.annotation.StringRes
 import androidx.lifecycle.lifecycleScope
 import app.knotwork.android.R
+import app.knotwork.android.domain.usecases.ImageAttachmentBlock
 import app.knotwork.android.domain.usecases.LaunchSharePipelineUseCase
 import app.knotwork.android.domain.usecases.ParseSharedContentUseCase
 import app.knotwork.android.domain.usecases.ShareLaunchResult
@@ -48,11 +48,16 @@ class ShareReceiverActivity : ComponentActivity() {
             return
         }
 
-        val streamUri = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)
+        val fields = SharedIntentFields.read(intent)
+        if (fields == null) {
+            toast(getString(R.string.share_nothing_to_share))
+            finish()
+            return
+        }
         val payload = parseSharedContent(
-            mimeType = intent.type,
-            text = intent.getStringExtra(Intent.EXTRA_TEXT),
-            streamUri = streamUri?.toString(),
+            mimeType = fields.mimeType,
+            text = fields.text,
+            streamUri = fields.streamUri,
         )
 
         lifecycleScope.launch {
@@ -84,7 +89,20 @@ class ShareReceiverActivity : ComponentActivity() {
             }
             ShareLaunchResult.NothingShared ->
                 toast(getString(R.string.share_nothing_to_share))
+            is ShareLaunchResult.Blocked -> toast(getString(blockedMessage(result.reason)))
+            ShareLaunchResult.RateLimited -> toast(getString(R.string.share_rate_limited))
         }
+    }
+
+    /**
+     * The notice for an image the pre-flight refused. The same decision as the
+     * chat's, in shorter words: a toast shows at most two lines on Android 12+.
+     */
+    @StringRes
+    private fun blockedMessage(reason: ImageAttachmentBlock): Int = when (reason) {
+        ImageAttachmentBlock.CLOUD_ENTRY -> R.string.share_image_blocked_cloud
+        ImageAttachmentBlock.MODEL_NO_VISION -> R.string.share_image_blocked_model_no_vision
+        ImageAttachmentBlock.NO_VISION_STEP -> R.string.share_image_blocked_no_vision_step
     }
 
     /** Deep-links into the run's session via [MainActivity] with a synthesised back stack. */

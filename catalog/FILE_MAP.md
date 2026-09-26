@@ -109,6 +109,7 @@ Paths below are relative to `src/main/java/app/knotwork/design/`.
     - `KnotworkMiscPreview.kt` - Harness rendering the loose components — loader, snackbar, empty state, striped placeholder, section action, stat cell — for the preview pane and the Roborazzi baseline.
     - `KnotworkSectionAction.kt` - Right-aligned action link sitting next to a section header (e.g. "Reset to defaults", "Manage", "+ Add provider").
     - `KnotworkSnackbar.kt` - Knotwork snackbar — thin wrapper over Material3 `Snackbar` that recolours by `variant` and pushes the action label through `KnotworkTextStyles`.
+    - `KnotworkSnackbarHost.kt` - The one snackbar host of the app: Material3's `SnackbarHost` rendering every message as a `KnotworkSnackbar` with Material's outer margin.
     - `KnotworkStatCell.kt` - Single stat-grid cell used by the Settings → Memory card's 4-up counter row (CHUNKS / SIZE / THREADS / AVG SCORE).
     - `KnotworkWarningBanner.kt` - A persistent, warning-toned notice with one inline action.
     - `StripedPlaceholder.kt` - Knotwork striped placeholder — the canonical "missing asset" stand-in for any product surface that ships before its real illustration / hero image is available.
@@ -409,6 +410,7 @@ matters.
   - `chat/` - the chat home, including the README hero shots.
     - `ChatBubbleShapesTest.kt` - Verifies the asymmetric corner radii on `ChatBubbleShapes`.
     - `ChatCatalogPageSnapshotTest.kt` - Roborazzi snapshot baseline for `ChatCatalogContent` in both themes plus a reduced-motion variant that pins `FixedKnotworkA11y` so the long-press scale + composer morph behave deterministically.
+    - `ChatComposerTapTest.kt` - A tap anywhere on the composer belongs to the composer.
     - `ChatMessageContextMenuTest.kt` - Pins the roster of the long-press message context menu.
     - `HitlConfirmationCardTest.kt` - Pins both halves of `HitlConfirmationCard`'s summary contract: a blank summary drops the line entirely, a real one still renders alongside the tool id.
     - `HitlConfirmationStateTest.kt` - Pure-JVM tests for `HitlConfirmationState` — the gating logic behind `HitlConfirmationCard`'s Allow CTA, Always-Allow visibility, and destructive typed-confirm row.
@@ -463,7 +465,9 @@ matters.
     - `ExternalAutomationSnapshotTest.kt` - Roborazzi baselines for the external-automation surfaces — the request journal across its documented states, and the consent dialog raised by the master switch — in both themes.
   - `chat/` - the chat home, including the README hero shots.
     - `ChatHomeAccessibilityTest.kt` - Chat-home a11y audit.
+    - `ChatHomeBottomBarTapTest.kt` - A tap on any part of the chat's bottom bar belongs to the bar, not to the message scrolled behind it.
     - `ChatHomeContentSnapshotTest.kt` - Roborazzi snapshot baseline for `ChatHomeContent` across every documented state of `compose/screens/README.md §C1`.
+    - `ChatHomeEmptyFitTest.kt` - A new chat's suggestion cards must all be reachable, however little height the screen leaves them.
     - `HeroSnapshotTest.kt` - Roborazzi baselines for the README hero shots at the canonical pixel resolution promised in `README.md` (1080 × 2400, the de-facto-standard Pixel-class portrait viewport used by every modern Android-store marketing surface).
     - `ReportResponseDialogSnapshotTest.kt` - Roborazzi baselines for the content-report dialog.
   - `chatarchive/` - the chat archive, including the font-scale-200 % layouts where the row sheds its decoration.
@@ -503,6 +507,7 @@ matters.
     - `PromptPresetPickerSnapshotTest.kt` - Roborazzi baselines for the prompt-preset picker.
     - `SavePromptAsPresetFormTest.kt` - Pure-logic tests for the parsing and submit-gate helpers behind `SavePromptAsPresetDialog`.
     - `SavePromptAsPresetSnapshotTest.kt` - Roborazzi baselines for the save-prompt-as-preset form.
+  - `SecretFieldImeTest.kt` - Every field that takes a credential tells the keyboard it is a password.
   - `settings/` - the settings hub and its category sub-screens, including the hint affordance, the search surface, and the provider / run-limits details.
     - `HeroSnapshotTest.kt` - Roborazzi baseline for the README "Settings" hero shot at the canonical 1080 × 2400 resolution.
     - `ProviderDetailSnapshotTest.kt` - Roborazzi baselines for the provider detail screen.
@@ -534,5 +539,5 @@ matters.
   - `KnotworkThemeTest.kt` - Verifies that `KnotworkTheme` wires the Knotwork tokens into the underlying `MaterialTheme` and into the `KnotworkTheme.*` composition-local accessors.
 - `tokens/` - the token data classes themselves, plus the WCAG contrast audit over every on-surface text pair.
   - `KnotworkTokensTest.kt` - Pure-JVM sanity tests for the token data classes — no Compose runtime, no Robolectric.
-  - `WcagContrastTest.kt` - WCAG 2.1 AA contrast audit for the on-surface text pairs the Knotwork design system depends on in both themes.
+  - `WcagContrastTest.kt` - Contrast checks for a few colour pairs of the Knotwork design system, in both themes, measured with the WCAG 2.1 formula.
 <!-- /AUTO-GEN:FILE_MAP_TESTS -->

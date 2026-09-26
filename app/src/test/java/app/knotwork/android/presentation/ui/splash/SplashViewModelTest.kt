@@ -48,7 +48,7 @@ class SplashViewModelTest {
         every { appContext.getString(any()) } returns RESET_KEYWORD
         appInitializationUseCase = mockk()
         resetLockedDatabaseUseCase = mockk()
-        coEvery { resetLockedDatabaseUseCase() } returns Unit
+        coEvery { resetLockedDatabaseUseCase() } returns true
     }
 
     @After
@@ -74,7 +74,7 @@ class SplashViewModelTest {
     fun `given full successful run when collected then ends in done state`() = runTest {
         every { appInitializationUseCase() } returns flowOf(
             InitProgress(InitStage.Initializing, "Preparing…", 0, 5),
-            InitProgress(InitStage.LoadingModel, "Loading model…", 1, 5),
+            InitProgress(InitStage.FindingModels, "Checking downloaded models…", 1, 5),
             InitProgress(InitStage.LoadingPipelines, "Reading pipelines…", 2, 5),
             InitProgress(InitStage.LoadingChats, "Reading chats…", 3, 5),
             InitProgress(InitStage.LoadingMemory, "Reading memory…", 4, 5),
@@ -291,7 +291,7 @@ class SplashViewModelTest {
             }
         }
         // Hold the wipe open so retry() can race it.
-        val wipeGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val wipeGate = kotlinx.coroutines.CompletableDeferred<Boolean>()
         coEvery { resetLockedDatabaseUseCase() } coAnswers { wipeGate.await() }
 
         val viewModel = createViewModel()
@@ -306,7 +306,7 @@ class SplashViewModelTest {
         viewModel.retry()
         testScheduler.runCurrent()
 
-        wipeGate.complete(Unit)
+        wipeGate.complete(true)
         advanceUntilIdle()
 
         // Exactly two runs: the implicit init + the post-wipe restart. No third from retry().

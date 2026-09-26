@@ -5,6 +5,7 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import app.knotwork.android.data.local.dao.BackgroundPromptDao
 import app.knotwork.android.data.local.dao.ChatDao
 import app.knotwork.android.data.local.dao.ChatHistorySummaryDao
 import app.knotwork.android.data.local.dao.ExternalAutomationJournalDao
@@ -22,6 +23,7 @@ import app.knotwork.android.data.local.dao.TraceStepDao
 import app.knotwork.android.data.local.dao.TriggerDao
 import app.knotwork.android.data.local.dao.TriggerJournalDao
 import app.knotwork.android.data.local.dao.UsageTelemetryDao
+import app.knotwork.android.data.local.models.BackgroundPromptEntity
 import app.knotwork.android.data.local.models.ChatHistorySummaryEntity
 import app.knotwork.android.data.local.models.ChatMessageEntity
 import app.knotwork.android.data.local.models.ChatSessionEntity
@@ -83,8 +85,9 @@ import app.knotwork.android.data.local.models.UsagePipelineDayEntity
         UsageActiveDayEntity::class,
         UsagePipelineDayEntity::class,
         OnboardingMilestoneEntity::class,
+        BackgroundPromptEntity::class,
     ],
-    version = 61,
+    version = 65,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -223,6 +226,14 @@ abstract class AppDatabase : RoomDatabase() {
      * @return The [ExternalAutomationJournalDao] instance.
      */
     abstract fun externalAutomationJournalDao(): ExternalAutomationJournalDao
+
+    /**
+     * Provides access to the [BackgroundPromptDao] backing the prompts of queued
+     * background runs (the `background_prompts` table).
+     *
+     * @return The [BackgroundPromptDao] instance.
+     */
+    abstract fun backgroundPromptDao(): BackgroundPromptDao
 
     companion object {
         /**
@@ -1511,6 +1522,76 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `pending_interactions` ADD COLUMN `ceilingAxis` TEXT")
                 db.execSQL("ALTER TABLE `pending_interactions` ADD COLUMN `ceilingLimit` INTEGER")
                 db.execSQL("ALTER TABLE `pending_interactions` ADD COLUMN `ceilingSpent` INTEGER")
+            }
+        }
+
+        /**
+         * Approval requests get an identity of their own: `requestId` on
+         * `pending_interactions`, the token every surface answers with, so an
+         * answer settles the request it was shown for rather than whatever its
+         * session is waiting on.
+         *
+         * Nullable, because clarifications and ceiling pauses have no approval
+         * request to name. Approval rows parked before this migration are
+         * back-filled with their own `runId`: their notifications were posted
+         * carrying only the run id, and the receiver answers such a
+         * notification with that id — so the back-fill is what keeps a request
+         * that was waiting across the update answerable from the notification
+         * it already has. A run id is unique per row (primary key), so the
+         * back-filled identities are as distinct as minted ones.
+         */
+        val MIGRATION_61_62 = object : Migration(61, 62) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `pending_interactions` ADD COLUMN `requestId` TEXT")
+                db.execSQL("UPDATE `pending_interactions` SET `requestId` = `runId` WHERE `kind` = 'APPROVAL'")
+            }
+        }
+
+        /**
+         * v62 → v63: adds `chat_messages.imported` — whether a row came from a chat
+         * file (*Import chat*) rather than being written on this device.
+         *
+         * A file decides each row's role and text, and nothing used to record that a
+         * row came from one: long-term memory extraction mined an imported USER row as
+         * something this device's user had said. Every row that existed before this
+         * migration was written on this device, so the back-fill is `0` — which is
+         * also what an imported row from an earlier release gets, since no record of
+         * its origin survives to back-fill from.
+         */
+        val MIGRATION_62_63 = object : Migration(62, 63) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `chat_messages` ADD COLUMN `imported` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * v63 → v64: adds `background_prompts` — the prompts of queued background
+         * runs, which used to travel in the background runtime's own unencrypted
+         * store as the worker's input. Additive; nothing to back-fill: requests
+         * queued before the update still carry their prompt and are read as such.
+         */
+        val MIGRATION_63_64 = object : Migration(63, 64) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `background_prompts` " +
+                        "(`id` TEXT NOT NULL, `prompt` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+                )
+            }
+        }
+
+        /**
+         * v64 → v65: adds `chat_messages.relayed` — whether an AGENT row's text was
+         * handed on unchanged rather than written by a model.
+         *
+         * An OUTPUT node in echo mode saves its input as the assistant's reply, so
+         * behind a TOOL node the reply is the tool's result verbatim, and long-term
+         * memory extraction read it as something the assistant had said. How an
+         * earlier row was produced was never recorded, so the back-fill is `0` —
+         * the behaviour every row had before this migration.
+         */
+        val MIGRATION_64_65 = object : Migration(64, 65) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `chat_messages` ADD COLUMN `relayed` INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

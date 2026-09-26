@@ -32,6 +32,8 @@ import app.knotwork.android.domain.repositories.SkillRepository
 import app.knotwork.android.domain.repositories.ToolRepository
 import app.knotwork.android.domain.services.PipelineCompositionValidator
 import app.knotwork.android.domain.services.findDependentPipelines
+import app.knotwork.android.domain.text.ImportedText
+import app.knotwork.android.domain.text.toDisplaySafe
 import app.knotwork.android.domain.usecases.ConfirmedImport
 import app.knotwork.android.domain.usecases.CreatePipelineUseCase
 import app.knotwork.android.domain.usecases.DeletePipelineUseCase
@@ -748,11 +750,15 @@ constructor(
                         val saveErr = invocation.saveResult?.let { res ->
                             res.exceptionOrNull()?.let(::messageForSaveError)
                         }
-                        val saved = collision == null && saveErr == null
+                        // The graph as written, not as parsed: the importer freshens
+                        // node and connection ids, and an editor holding the file's
+                        // ids would write them back on its next Save.
+                        val savedGraph = invocation.saveResult?.getOrNull()
+                        val saved = collision == null && savedGraph != null
                         state.copy(
-                            currentPipeline = if (saved) outcome.graph else state.currentPipeline,
+                            currentPipeline = savedGraph ?: state.currentPipeline,
                             // An import that reached storage IS the saved state.
-                            persistedPipeline = if (saved) outcome.graph else state.persistedPipeline,
+                            persistedPipeline = savedGraph ?: state.persistedPipeline,
                             isLoading = false,
                             pendingImport = null,
                             pendingCollision = collision,
@@ -784,7 +790,12 @@ constructor(
                         state.copy(
                             isLoading = false,
                             pendingImport = null,
-                            errorMessage = UiText.Dynamic(outcome.message),
+                            // Display-safe as a whole, behind the per-value rule in
+                            // the serializer: the message quotes a file the user did
+                            // not write.
+                            errorMessage = UiText.Dynamic(
+                                outcome.message.toDisplaySafe(ImportedText.MAX_MESSAGE_LENGTH),
+                            ),
                         )
                 }
             }
@@ -800,16 +811,19 @@ constructor(
      * @param resolution The user's collision choice.
      */
     fun resolveCollision(resolution: ImportCollisionResolution) {
-        val graph = _uiState.value.pendingCollision ?: return
+        val collision = _uiState.value.pendingCollision ?: return
         _uiState.update { it.copy(isLoading = true, pendingCollision = null) }
         viewModelScope.launch {
-            val result = importPipelineUseCase.persistWithResolution(graph, resolution)
+            val result = importPipelineUseCase.persistWithResolution(collision.incoming, resolution)
             _uiState.update { state ->
                 val saveErr = result.exceptionOrNull()?.let(::messageForSaveError)
-                val replaced = saveErr == null && resolution == ImportCollisionResolution.REPLACE
+                // Only Replace opens the result: a copy is a new pipeline beside
+                // the one the user was looking at. Either way the editor takes
+                // the graph as written (freshened ids), never the parsed one.
+                val replaced = result.getOrNull()?.takeIf { resolution == ImportCollisionResolution.REPLACE }
                 state.copy(
-                    currentPipeline = if (replaced) graph else state.currentPipeline,
-                    persistedPipeline = if (replaced) graph else state.persistedPipeline,
+                    currentPipeline = replaced ?: state.currentPipeline,
+                    persistedPipeline = replaced ?: state.persistedPipeline,
                     isLoading = false,
                     errorMessage = saveErr,
                 )
@@ -837,18 +851,23 @@ constructor(
             when (val prepared = importPipelineBundleUseCase.prepare(jsonString)) {
                 is PipelineBundlePrepareResult.Failure ->
                     _uiState.update {
-                        it.copy(isLoading = false, errorMessage = UiText.Dynamic(prepared.message))
+                        it.copy(
+                            isLoading = false,
+                            errorMessage = UiText.Dynamic(
+                                prepared.message.toDisplaySafe(ImportedText.MAX_MESSAGE_LENGTH),
+                            ),
+                        )
                     }
 
                 is PipelineBundlePrepareResult.Ready -> {
-                    val needsPrompt = prepared.collidingIds.isNotEmpty() || prepared.schemaMismatches.isNotEmpty()
+                    val needsPrompt = prepared.collisions.isNotEmpty() || prepared.schemaMismatches.isNotEmpty()
                     if (needsPrompt) {
                         _uiState.update {
                             it.copy(
                                 isLoading = false,
                                 pendingBundleImport = PendingBundleImport(
                                     pipelines = prepared.pipelines,
-                                    collidingIds = prepared.collidingIds,
+                                    collisions = prepared.collisions,
                                     schemaMismatches = prepared.schemaMismatches,
                                 ),
                             )
@@ -977,14 +996,15 @@ constructor(
                 // The confirmed graph collides with an existing pipeline: defer
                 // to the collision dialog instead of silently overwriting.
                 is ConfirmedImport.Collision ->
-                    _uiState.update { it.copy(isLoading = false, pendingCollision = confirmed.graph) }
+                    _uiState.update { it.copy(isLoading = false, pendingCollision = confirmed.collision) }
 
                 is ConfirmedImport.Saved ->
                     _uiState.update { state ->
                         val saveErr = confirmed.result.exceptionOrNull()?.let(::messageForSaveError)
+                        val savedGraph = confirmed.result.getOrNull()
                         state.copy(
-                            currentPipeline = if (saveErr == null) pending.graph else state.currentPipeline,
-                            persistedPipeline = if (saveErr == null) pending.graph else state.persistedPipeline,
+                            currentPipeline = savedGraph ?: state.currentPipeline,
+                            persistedPipeline = savedGraph ?: state.persistedPipeline,
                             isLoading = false,
                             errorMessage = saveErr,
                         )
@@ -1087,36 +1107,38 @@ constructor(
             UiText(R.string.errors_orchestrator_validation_unreachable_node)
         is PipelineValidationError.DeadEndNode ->
             UiText(R.string.errors_orchestrator_validation_dead_end)
-        is PipelineValidationError.NodeEmptyContext -> {
-            val name = _uiState.value.currentPipeline.nodes
-                .find { it.id == err.nodeId }?.label ?: err.nodeId
-            UiText.of(R.string.errors_orchestrator_validation_node_no_sources, name)
-        }
-        is PipelineValidationError.MissingTargetPipeline -> {
-            val name = _uiState.value.currentPipeline.nodes
-                .find { it.id == err.nodeId }?.label ?: err.nodeId
-            UiText.of(R.string.errors_orchestrator_validation_missing_target_pipeline, name)
-        }
-        is PipelineValidationError.TargetPipelineNotFound -> {
-            val name = _uiState.value.currentPipeline.nodes
-                .find { it.id == err.nodeId }?.label ?: err.nodeId
-            UiText.of(R.string.errors_orchestrator_validation_target_pipeline_not_found, name)
-        }
+        is PipelineValidationError.NodeEmptyContext ->
+            UiText.of(R.string.errors_orchestrator_validation_node_no_sources, nodeNameForError(err.nodeId))
+        is PipelineValidationError.MissingTargetPipeline ->
+            UiText.of(R.string.errors_orchestrator_validation_missing_target_pipeline, nodeNameForError(err.nodeId))
+        is PipelineValidationError.TargetPipelineNotFound ->
+            UiText.of(R.string.errors_orchestrator_validation_target_pipeline_not_found, nodeNameForError(err.nodeId))
         is PipelineValidationError.PipelineCycle ->
-            UiText.of(R.string.errors_orchestrator_validation_pipeline_cycle, err.pipelineChain.joinToString(" → "))
+            UiText.of(
+                R.string.errors_orchestrator_validation_pipeline_cycle,
+                err.pipelineChain.joinToString(" → ") { it.toDisplaySafe() },
+            )
         is PipelineValidationError.PipelineNestingTooDeep ->
             UiText.of(R.string.errors_orchestrator_validation_pipeline_nesting_too_deep, err.limit)
-        is PipelineValidationError.MissingSkill -> {
-            val name = _uiState.value.currentPipeline.nodes
-                .find { it.id == err.nodeId }?.label ?: err.nodeId
-            UiText.of(R.string.errors_orchestrator_validation_missing_skill, name)
-        }
-        is PipelineValidationError.SkillNotFound -> {
-            val name = _uiState.value.currentPipeline.nodes
-                .find { it.id == err.nodeId }?.label ?: err.nodeId
-            UiText.of(R.string.errors_orchestrator_validation_skill_not_found, name)
-        }
+        is PipelineValidationError.MissingSkill ->
+            UiText.of(R.string.errors_orchestrator_validation_missing_skill, nodeNameForError(err.nodeId))
+        is PipelineValidationError.SkillNotFound ->
+            UiText.of(R.string.errors_orchestrator_validation_skill_not_found, nodeNameForError(err.nodeId))
     }
+
+    /**
+     * The name a validation error calls a node by: its label, or its id when
+     * the node is not on the canvas.
+     *
+     * Display-safe, because both may come from a file the user did not write —
+     * an imported label is bounded at parse, a node id is not — and the error
+     * is shown in a snackbar with no line limit.
+     *
+     * @param nodeId the id the validator reported.
+     * @return one line of at most [ImportedText.MAX_QUOTED_VALUE_LENGTH] characters.
+     */
+    private fun nodeNameForError(nodeId: String): String =
+        (_uiState.value.currentPipeline.nodes.find { it.id == nodeId }?.label ?: nodeId).toDisplaySafe()
 
     /**
      * Lifts a thrown exception into a `UiText`, falling back to the generic

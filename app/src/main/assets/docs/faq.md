@@ -76,9 +76,10 @@ is not something the app will do quietly on your behalf.
 
 It downloads a `.litertlm` **file** onto the phone from a direct link — it is not
 a way to point the app at a remote model that stays on a server. It can
-authenticate, but only with a bearer token: fill the Hugging Face access-token
-field on the Models screen and the download carries it as an `Authorization`
-header. There is no OAuth flow, and no other auth scheme. See
+authenticate, but only with a bearer token and only on `huggingface.co`: fill
+the Hugging Face access-token field on the Models screen and a download from
+that host carries it as an `Authorization` header; a link to any other host
+downloads without it. There is no OAuth flow, and no other auth scheme. See
 [Download a model](user-guide.md#2-download-a-model).
 
 ### Can I browse and install models from Hugging Face?
@@ -88,8 +89,8 @@ Yes, including gated repositories once you have stored an access token. See
 
 ### What is the FOSS build and how does it differ?
 
-A second flavour with zero proprietary dependencies, built for F-Droid: no
-Firebase, no crash reporting, and no consent toggle for it. Everything else —
+A second flavour built for F-Droid: no crash reporting, no analytics, and no
+consent toggle for them. Everything else —
 local models, cloud providers, MCP, triggers — is identical. See
 [README § Install](../README.md#install).
 
@@ -138,8 +139,9 @@ providers](../SECURITY.md#api-keys-for-cloud-providers).
 Usage statistics exist, they stay on the device, and they are never transmitted —
 a build-time check fails the build if any network dependency reaches that code.
 Crash reporting is separate, off by default, `full`-build only, and asks before
-it collects anything. See [SECURITY § What is
-collected](../SECURITY.md#what-is-collected-crash-reporting).
+it collects anything. The on-device library behind memory search (MediaPipe)
+carries a usage reporter of its own; release builds remove it. See [SECURITY §
+What is collected](../SECURITY.md#what-is-collected-crash-reporting).
 
 ### Is my chat history encrypted on the phone?
 
@@ -252,7 +254,8 @@ External automation carries the same pair for inbound requests.
 
 Attach either to a bug report about background reliability — it says what the
 app actually did while you were not watching, which nothing else can. The file
-holds the journal rows only: no message a run was given, no answer it produced.
+holds the journal rows: a failed run's error message, but no message a run was
+given and no answer it produced.
 Neither action touches the network. See [Checking what a trigger has been
 doing](user-guide.md#checking-what-a-trigger-has-been-doing).
 
@@ -331,8 +334,9 @@ it on](external-automation.md#switching-it-on).
 
 ### How do I get the result back?
 
-The request can name a callback broadcast, which carries the run's status and
-output. Statuses and refusal reasons are enumerated. See [Receiving the
+The request can name a callback broadcast, which carries the run's status —
+never its output: have the pipeline put the result somewhere you can read.
+Statuses and refusal reasons are enumerated. See [Receiving the
 callback](external-automation.md#receiving-the-callback).
 
 ### Does calling from outside skip the confirmations?

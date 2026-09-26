@@ -8,7 +8,6 @@ import app.knotwork.android.domain.models.PendingDecision
 import app.knotwork.android.domain.models.PendingInteraction
 import app.knotwork.android.domain.models.PendingInteractionKind
 import app.knotwork.android.domain.models.Role
-import app.knotwork.android.domain.models.ToolApprovalPolicy
 import app.knotwork.android.domain.models.ToolExecutionContext
 import app.knotwork.android.domain.models.ToolRisk
 import app.knotwork.android.domain.models.TriggerHitlEvent
@@ -26,6 +25,7 @@ import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
 import timber.log.Timber
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -44,18 +44,30 @@ import javax.inject.Singleton
  *
  * Given an already-resolved `(toolName, arguments)` pair the gate:
  *
- *  1. resolves the effective [ToolRisk] (canonical source: [ToolRepository.getRisk]);
- *  2. hard-denies the call when it is [ToolRisk.DESTRUCTIVE] and the user has
+ *  1. consumes the one-shot decision a resumed run recorded on its parked
+ *     request, if there is one — before anything can end the gate early;
+ *  2. resolves the effective [ToolRisk] (canonical source: [ToolRepository.getRisk]);
+ *  3. hard-denies the call when it is [ToolRisk.DESTRUCTIVE] and the user has
  *     blocked destructive tools in Settings;
- *  3. raises a HITL approval gate according to the [ToolApprovalPolicy], using
- *     the two-phase live-deferred → durable-park protocol;
- *  4. executes the tool through [ToolRepository] and emits the observation.
+ *  4. applies the recorded decision whatever the current policy says — or, when
+ *     there is none, raises a HITL approval gate when
+ *     `ToolApprovalPolicy.requiresApproval` (or the node's `alwaysConfirm`) says
+ *     so, using the two-phase live-deferred → durable-park protocol;
+ *  5. executes the tool through [ToolRepository] and emits the observation.
  *
  * Every gate it raises is also reported to the trigger-evaluation journal via
  * [RecordTriggerHitlEventUseCase] — raise, park and settlement alike — so that a
  * background run which stopped to ask the user is visible as such afterwards
  * instead of settling into an anonymous success. The reports are no-ops for runs
  * that own no journal row (every interactive one).
+ *
+ * Every gate it raises gets an identity of its own — a token minted here and
+ * carried by the request state, the chat card, both notifications and the
+ * parked record — and an answer settles a request only when it names that
+ * token. A session is not an address: a parked request and a live one coexist
+ * in one session whenever a second run starts there, so "complete whatever
+ * this session waits on" would let the answer given for one request authorise
+ * another.
  *
  * Marked `@Singleton` because [activeApprovalDeferreds] holds per-session
  * pending approval requests that must outlive any individual node execution
@@ -91,26 +103,31 @@ class ToolInvocationGate @Inject constructor(
     )
 
     /**
-     * Completes the suspended approval request for [sessionId] with the user's decision.
+     * Completes the live approval request [requestId] of [sessionId] with the
+     * user's decision — and nothing else.
      *
-     * Invoked from the UI layer (`MainActivity`) and the notification-action receiver
-     * (`AgentApprovalReceiver`). No-ops silently when there is no pending request for
-     * the given session — duplicate dispatches (e.g. user taps the notification action
-     * after the dialog already resumed the executor) cannot corrupt state.
+     * Reached only through `SubmitApprovalDecisionUseCase` (the chat card and
+     * the notification receiver both route there). The request must be the one
+     * the session is suspended on right now: a decision for any other request
+     * — a parked one, an earlier one of the same run, one whose notification
+     * outlived it — leaves the live gate waiting and returns `false`, so the
+     * caller can look for the parked record that request names instead. The
+     * match and the removal are one atomic step, so a duplicate dispatch cannot
+     * settle a request twice.
+     *
+     * The approval notification is not touched here: the gate removes it itself
+     * when the wait ends, on this path and on every other one.
      *
      * @param sessionId chat session id used as the lookup key in [activeApprovalDeferreds].
+     * @param requestId identity of the request the decision was given for.
      * @param isApproved `true` if the user approved tool execution, `false` to deny it.
+     * @return `true` when the decision settled the live request it names;
+     *   `false` when no live request of [sessionId] carries [requestId].
      */
-    fun resumeWithApproval(sessionId: String, isApproved: Boolean) {
-        val holder = activeApprovalDeferreds.remove(sessionId)
-        holder?.deferred?.complete(isApproved)
-        // Settle any approval notification for this session. When the decision is
-        // made from the in-chat card (the common case) the live-phase notification
-        // — posted while the app was backgrounded — would otherwise keep hanging in
-        // the shade offering a choice that has already been made. Idempotent: a
-        // no-op when nothing was posted (e.g. the request was answered while the
-        // chat was on screen and the notification was suppressed to begin with).
-        approvalNotifier.cancelApprovalNotification(sessionId)
+    fun resumeWithApproval(sessionId: String, requestId: String, isApproved: Boolean): Boolean {
+        val holder = activeApprovalDeferreds[sessionId]?.takeIf { it.request.requestId == requestId } ?: return false
+        if (!activeApprovalDeferreds.remove(sessionId, holder)) return false
+        return holder.deferred.complete(isApproved)
     }
 
     /**
@@ -157,6 +174,10 @@ class ToolInvocationGate @Inject constructor(
      * @param runId persistent run id, or `null` for non-persisted (editor test) runs.
      * @param resolvedToolName the tool to run.
      * @param resolvedToolArgs the tool's argument JSON string.
+     * @param alwaysConfirm the dispatching node's own "always ask" switch; `true`
+     *   adds an approval the policy would not have raised, and can never remove
+     *   one. Deliberately without a default: every node type that dispatches
+     *   tools must pass its switch, so a new caller cannot silently drop it.
      */
     @Suppress("LongMethod", "CyclomaticComplexMethod", "NestedBlockDepth")
     suspend fun dispatch(
@@ -167,8 +188,31 @@ class ToolInvocationGate @Inject constructor(
         runId: String?,
         resolvedToolName: String,
         resolvedToolArgs: String,
-        alwaysConfirm: Boolean = false,
+        alwaysConfirm: Boolean,
     ) = with(collector) {
+        // Consume the parked record first, before anything that can end the
+        // gate early (a failed risk lookup, the destructive hard block). The
+        // record is one-shot: an early return that skipped the consumption
+        // would leave an answer behind that outlives the gate it belonged to.
+        val parkedAnswer = consumeParkedAnswer(runId, resolvedToolName, resolvedToolArgs)
+        if (parkedAnswer != null) {
+            // Settles the gate this run parked on in an earlier process (which
+            // counted itself then). Written here, before the risk and the policy
+            // are even read, because the answer was given and that gate ended on
+            // every path below — including the ones that refuse the call anyway,
+            // and the one that asks a new question about a different call.
+            recordTriggerHitlEvent(
+                runId,
+                TriggerHitlEvent.Resolved(
+                    if (parkedAnswer.decision == PendingDecision.APPROVED) {
+                        TriggerHitlResolution.APPROVED
+                    } else {
+                        TriggerHitlResolution.DENIED
+                    },
+                ),
+            )
+        }
+
         // `getRisk` throws `IllegalArgumentException` when the tool isn't in the
         // catalogue — this is reachable if the LLM hallucinates a tool name, or
         // if a tool was unregistered between discovery and execution. Surface a
@@ -179,7 +223,7 @@ class ToolInvocationGate @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Timber.tag("PipelineDebug").e(e, "Risk lookup failed for tool '$resolvedToolName'")
+            Timber.tag("PipelineDebug").e(e, "Risk lookup failed for tool '%s'", resolvedToolName)
             val errorMsg = "Risk lookup failed for tool $resolvedToolName: ${e.message}"
             emit(NodeOutput.State(AgentOrchestratorState.Error(errorMsg)))
             emit(NodeOutput.Result(NodeExecutionResult(error = errorMsg, resolvedToolName = resolvedToolName)))
@@ -216,89 +260,91 @@ class ToolInvocationGate @Inject constructor(
             )
             return@with
         }
-        val approvalPolicy = settingsRepository.toolApprovalPolicy.first()
-        // The node's own switch can only ADD a prompt, never remove one — which
-        // is why it ORs into the policy instead of replacing it. A pipeline file
-        // is a document that can be shared, and a node able to declare "do not
-        // ask about this destructive call" would let somebody else's document
-        // walk straight past the gate.
-        val needsApproval = alwaysConfirm ||
-            when (approvalPolicy) {
-                ToolApprovalPolicy.AllCalls -> true
-                ToolApprovalPolicy.NeverPrompt -> false
-                ToolApprovalPolicy.SensitiveOrDestructive -> risk == ToolRisk.SENSITIVE || risk == ToolRisk.DESTRUCTIVE
-            }
+        // Which risks ask is the policy's rule, written once in
+        // `ToolApprovalPolicy.requiresApproval` — a destructive call asks under
+        // every policy. The node's own switch can only ADD a prompt, never
+        // remove one — which is why it ORs into the policy instead of replacing
+        // it. A pipeline file is a document that can be shared, and a node able
+        // to declare "do not ask about this destructive call" would let
+        // somebody else's document walk straight past the gate.
+        //
+        // A recorded answer applies only to the call it answered. A denial
+        // authorises nothing, so it applies whatever the risk has become; an
+        // approval covers the card the user saw — the same arguments at the same
+        // risk. Anything else (other arguments, or an approval given at another
+        // risk) is a question still pending on this run, and it is asked again
+        // whatever the policy says: a quiet policy never gets to settle a
+        // question the user was already asked.
+        val appliedDecision = parkedAnswer?.takeIf { it.sameCall }?.decision?.takeIf { decision ->
+            decision == PendingDecision.DENIED || parkedAnswer.risk == risk
+        }
+        val askAgain = parkedAnswer != null && appliedDecision == null
+        val needsApproval =
+            askAgain || alwaysConfirm || settingsRepository.toolApprovalPolicy.first().requiresApproval(risk)
         var isApproved = true
 
-        // Consume any parked approval decision up-front, regardless of the
-        // current policy. A run can park under SensitiveOrDestructive/AllCalls
-        // and then be resumed after the user relaxed the policy to NeverPrompt —
-        // then [needsApproval] is false and the durable record would otherwise
-        // never be deleted (orphaned until the maintenance sweep). Consuming it
-        // here clears the record in that case; when approval IS still required
-        // the captured decision drives the gate exactly as before.
-        val parkedDecision = consumeParkedDecision(runId, resolvedToolName, resolvedToolArgs)
-        if (parkedDecision != null) {
-            // Settles the gate this run parked on in an earlier process (which
-            // counted itself then). Written here rather than alongside the live
-            // settlement below because the decision also has to be journalled on
-            // the path where the policy relaxed to NeverPrompt while the run was
-            // parked: the answer was still given, and the gate still ended.
-            recordTriggerHitlEvent(
-                runId,
-                TriggerHitlEvent.Resolved(
-                    if (parkedDecision == PendingDecision.APPROVED) {
-                        TriggerHitlResolution.APPROVED
-                    } else {
-                        TriggerHitlResolution.DENIED
-                    },
-                ),
-            )
-        }
+        if (appliedDecision != null) {
+            // A resumed run carries the user's one-shot decision for this exact
+            // request snapshot — apply it without raising a new gate, and apply
+            // it whatever the policy says now. The policy and the risk are re-read
+            // on resume (the user may have relaxed either while the run was
+            // parked), but they only decide whether a NEW question must be asked;
+            // a recorded answer is the answer to one that was asked, and a later
+            // setting cannot un-ask it. A denial stays a denial.
+            isApproved = appliedDecision == PendingDecision.APPROVED
+        } else if (needsApproval) {
+            // Journal the gate the moment it is raised, not when (or if) it
+            // parks: the live waiting phase is a full minute by default, so a
+            // background approval answered promptly from the notification
+            // never parks — and recording only parks would leave exactly that
+            // case looking like "this run never asked for anything".
+            recordTriggerHitlEvent(runId, TriggerHitlEvent.Raised(PendingInteractionKind.APPROVAL))
+            val requestId = UUID.randomUUID().toString()
+            val approvalRequest =
+                AgentOrchestratorState.WaitingForApproval(resolvedToolName, resolvedToolArgs, risk, requestId)
+            emit(NodeOutput.State(approvalRequest))
+            approvalNotifier.sendApprovalRequest(sessionId, requestId, resolvedToolName, resolvedToolArgs, risk)
 
-        if (needsApproval) {
-            if (parkedDecision != null) {
-                // A resumed run carries the user's one-shot decision for this
-                // exact request snapshot — apply it without raising a new gate.
-                isApproved = parkedDecision == PendingDecision.APPROVED
-            } else {
-                // Journal the gate the moment it is raised, not when (or if) it
-                // parks: the live waiting phase is a full minute by default, so a
-                // background approval answered promptly from the notification
-                // never parks — and recording only parks would leave exactly that
-                // case looking like "this run never asked for anything".
-                recordTriggerHitlEvent(runId, TriggerHitlEvent.Raised(PendingInteractionKind.APPROVAL))
-                val approvalRequest =
-                    AgentOrchestratorState.WaitingForApproval(resolvedToolName, resolvedToolArgs, risk)
-                emit(NodeOutput.State(approvalRequest))
-                approvalNotifier.sendApprovalRequest(sessionId, resolvedToolName, resolvedToolArgs, risk)
-
-                // Register deferred before any suspension point so a fast approval is not dropped
-                val deferred = CompletableDeferred<Boolean>()
-                val holder = PendingApprovalHolder(deferred, approvalRequest)
-                activeApprovalDeferreds[sessionId] = holder
-                val timeoutMs = settingsRepository.toolCallTimeoutMs.first()
-                isApproved = try {
-                    withTimeout(timeoutMs) { deferred.await() }
-                } catch (e: TimeoutCancellationException) {
-                    Timber.tag("PipelineDebug").w("Live approval phase timed out for session: $sessionId")
-                    // Retire the live gate BEFORE parking, not in the `finally`
-                    // below. `parkRun` suspends on storage, and while the durable
-                    // record already exists but the holder is still registered the
-                    // two states disagree: a notification approval arriving in that
-                    // window takes `SubmitApprovalDecisionUseCase`'s live
-                    // short-circuit and completes a deferred whose `withTimeout`
-                    // has already given up — the decision is silently swallowed and
-                    // the run stays parked. Removing first makes the transition
-                    // atomic from an observer's point of view: the gate is either
-                    // live or durable, never both. The `finally` remove stays for
-                    // every other exit path (it is a no-op once removed here).
-                    activeApprovalDeferreds.remove(sessionId, holder)
-                    if (runId != null && parkRun(runId, sessionId, resolvedToolName, resolvedToolArgs, risk)) {
+            // Register deferred before any suspension point so a fast approval is not dropped
+            val deferred = CompletableDeferred<Boolean>()
+            val holder = PendingApprovalHolder(deferred, approvalRequest)
+            activeApprovalDeferreds[sessionId] = holder
+            val timeoutMs = settingsRepository.toolCallTimeoutMs.first()
+            var parked = false
+            isApproved = try {
+                withTimeout(timeoutMs) { deferred.await() }
+            } catch (e: TimeoutCancellationException) {
+                // Retire the live gate BEFORE parking, not in the `finally`
+                // below. `parkRun` suspends on storage, and while the durable
+                // record already exists but the holder is still registered the
+                // two states disagree: a notification approval arriving in that
+                // window takes `SubmitApprovalDecisionUseCase`'s live
+                // short-circuit and completes a deferred whose `withTimeout`
+                // has already given up — the decision is silently swallowed and
+                // the run stays parked. Removing first makes the transition
+                // atomic from an observer's point of view: the gate is either
+                // live or durable, never both. The `finally` remove stays for
+                // every other exit path (it is a no-op once removed here).
+                if (!activeApprovalDeferreds.remove(sessionId, holder)) {
+                    // Lost the removal: an answer claimed this very request in
+                    // the moment the wait ran out. `resumeWithApproval` removes
+                    // and then completes, and it told its caller the request is
+                    // settled — so that answer is the answer, and parking now
+                    // would drop it. It is completed, or about to be.
+                    deferred.await()
+                } else {
+                    Timber.tag("PipelineDebug").w("Live approval phase timed out for session: %s", sessionId)
+                    val request = ParkedApprovalRequest(requestId, resolvedToolName, resolvedToolArgs, risk)
+                    if (runId != null && parkRun(runId, sessionId, request)) {
                         // Two-phase wait, second phase: the run parks on its
                         // durable pending record instead of failing. No
                         // NodeOutput.Result on purpose — the engine stops the
                         // walk and the run record stays WAITING_APPROVAL.
+                        // Flagged before the emit: a collector that stops at
+                        // this state aborts the flow inside it, and the
+                        // `finally` must still know the ongoing notification
+                        // now holds the request's slot.
+                        parked = true
                         recordTriggerHitlEvent(runId, TriggerHitlEvent.Parked)
                         emit(
                             NodeOutput.State(
@@ -306,73 +352,75 @@ class ToolInvocationGate @Inject constructor(
                             ),
                         )
                     } else {
-                        // Non-persisted runs (editor test runs) and storage
-                        // failures keep the legacy fail-fast semantics: a park
-                        // without a durable record would be unrecoverable. The
-                        // gate ends without the user ever getting the chance to
-                        // answer it — ABANDONED, not TIMED_OUT.
-                        recordTriggerHitlEvent(
-                            runId,
-                            TriggerHitlEvent.Resolved(TriggerHitlResolution.ABANDONED),
-                        )
-                        emit(NodeOutput.State(AgentOrchestratorState.Error("Approval request timed out")))
-                        emit(NodeOutput.Result(NodeExecutionResult(error = "Approval request timed out")))
+                        abandonTimedOutGate(runId)
                     }
                     return@with
-                } finally {
-                    // Covers every exit: timeout, resume (already removed — the
-                    // two-arg remove is then a no-op), and plain cancellation of
-                    // the suspended gate (scope teardown, an abandoned editor
-                    // test run). Without this, a leaked holder would keep
-                    // serving pendingApprovalFor a request no coroutine can
-                    // ever settle. remove(key, value) leaves a newer
-                    // registration for the same session untouched.
-                    activeApprovalDeferreds.remove(sessionId, holder)
                 }
-                // Reached only when the live phase settled with the user's
-                // decision (the timeout path returns above), so the gate ends
-                // without ever having parked.
-                recordTriggerHitlEvent(
-                    runId,
-                    TriggerHitlEvent.Resolved(
-                        if (isApproved) TriggerHitlResolution.APPROVED else TriggerHitlResolution.DENIED,
-                    ),
-                )
+            } finally {
+                // Covers every exit: timeout, resume (already removed — the
+                // two-arg remove is then a no-op), and plain cancellation of
+                // the suspended gate (scope teardown, an abandoned editor
+                // test run). Without this, a leaked holder would keep
+                // serving pendingApprovalFor a request no coroutine can
+                // ever settle. remove(key, value) leaves a newer
+                // registration for the same session untouched.
+                activeApprovalDeferreds.remove(sessionId, holder)
+                // The live notification goes with the wait, however it ended —
+                // answered, stopped, timed out without a park. Left behind it is
+                // an Approve button for a request nothing waits on any more.
+                // Not after a park: the ongoing notification took its slot.
+                if (!parked) approvalNotifier.cancelApprovalNotification(requestId)
             }
+            // Reached only when the live phase settled with the user's
+            // decision (the timeout path returns above), so the gate ends
+            // without ever having parked.
+            recordTriggerHitlEvent(
+                runId,
+                TriggerHitlEvent.Resolved(
+                    if (isApproved) TriggerHitlResolution.APPROVED else TriggerHitlResolution.DENIED,
+                ),
+            )
+        }
 
-            if (!isApproved) {
-                chatRepository.saveMessage(
-                    ChatMessage(
-                        sessionId = sessionId,
-                        role = Role.SYSTEM,
-                        content = "User denied execution of tool: $resolvedToolName",
-                        timestamp = System.currentTimeMillis(),
-                        isFinal = false,
+        if (!isApproved) {
+            chatRepository.saveMessage(
+                ChatMessage(
+                    sessionId = sessionId,
+                    role = Role.SYSTEM,
+                    content = "User denied execution of tool: $resolvedToolName",
+                    timestamp = System.currentTimeMillis(),
+                    isFinal = false,
+                ),
+            )
+            emit(
+                NodeOutput.State(
+                    AgentOrchestratorState.ObservationResult(resolvedToolName, "Execution denied by user"),
+                ),
+            )
+            emit(
+                NodeOutput.Result(
+                    NodeExecutionResult(
+                        outputText = "Execution denied by user",
+                        resolvedToolName = resolvedToolName,
                     ),
-                )
-                emit(
-                    NodeOutput.State(
-                        AgentOrchestratorState.ObservationResult(resolvedToolName, "Execution denied by user"),
-                    ),
-                )
-                emit(
-                    NodeOutput.Result(
-                        NodeExecutionResult(
-                            outputText = "Execution denied by user",
-                            resolvedToolName = resolvedToolName,
-                        ),
-                    ),
-                )
-                return@with
-            }
+                ),
+            )
+            return@with
         }
 
         emit(NodeOutput.State(AgentOrchestratorState.ExecutingTool(resolvedToolName, resolvedToolArgs)))
         val result = try {
             // The context carries the engine-known session id so tools that
             // bind follow-up work to the conversation (schedule_task) get it
-            // from a source the LLM-emitted arguments cannot spoof.
-            toolRepository.executeTool(resolvedToolName, resolvedToolArgs, ToolExecutionContext(sessionId))
+            // from a source the LLM-emitted arguments cannot spoof — and the
+            // risk this gate decided on, so the repository can refuse a call
+            // whose serving tool changed since (an MCP name taken over by a
+            // server that reconnected while the card was up).
+            toolRepository.executeTool(
+                resolvedToolName,
+                resolvedToolArgs,
+                ToolExecutionContext(sessionId = sessionId, gatedRisk = risk),
+            )
         } catch (e: CancellationException) {
             // Preserve structured-concurrency cancellation: tool execution may suspend,
             // and a broad `catch (Exception)` would silently swallow the cancel.
@@ -380,7 +428,7 @@ class ToolInvocationGate @Inject constructor(
         } catch (e: Exception) {
             Timber.tag(
                 "PipelineDebug",
-            ).e(e, "[NODE_ERR] type=$nodeType id=$nodeId error executing tool: $resolvedToolName")
+            ).e(e, "[NODE_ERR] type=%s id=%s error executing tool: %s", nodeType, nodeId, resolvedToolName)
             "Error executing $resolvedToolName: ${e.message}"
         }
 
@@ -398,41 +446,69 @@ class ToolInvocationGate @Inject constructor(
     }
 
     /**
+     * The answer the user gave to the approval request a resumed run parked on.
+     *
+     * @property decision What the user answered.
+     * @property risk The risk shown on the card the user answered; `null` only
+     *   for a record written without one, which no approval can then match.
+     * @property sameCall Whether the resumed run makes the same call — tool
+     *   name and arguments identical to the parked snapshot. A run that
+     *   regenerates its arguments makes a different call, which the answer
+     *   does not cover.
+     */
+    private data class ParkedAnswer(val decision: PendingDecision, val risk: ToolRisk?, val sameCall: Boolean)
+
+    /**
      * Consumes the parked approval record of a resumed run, one-shot.
      *
      * The record never survives its first consumption attempt: whatever the
      * outcome, it is deleted so a stale decision can never authorise a later
-     * call. The recorded decision applies only under the TOCTOU guard — the
-     * re-resolved tool name and arguments must match the parked snapshot
-     * exactly; the auto-select / argument-generation LLM passes are not
-     * deterministic, and a decision the user gave for one concrete call must
-     * not leak onto a different one.
+     * call. Whether the answer applies is decided by the caller, once the
+     * call's current risk is known: the auto-select / argument-generation LLM
+     * passes are not deterministic, and a decision the user gave for one
+     * concrete call must not leak onto a different one.
      *
      * @param runId Id of the executing run, or `null` for non-persisted runs.
      * @param resolvedToolName Tool name resolved by this execution.
      * @param resolvedToolArgs Argument string resolved by this execution.
-     * @return The user's decision when it may be applied, or `null` when a
-     *   fresh approval gate must be raised (no record, undecided record, or
-     *   TOCTOU mismatch).
+     * @return The user's answer with what it was given for, or `null` when the
+     *   run parked on nothing answered (no record, or one never decided).
      */
-    private suspend fun consumeParkedDecision(
+    private suspend fun consumeParkedAnswer(
         runId: String?,
         resolvedToolName: String,
         resolvedToolArgs: String,
-    ): PendingDecision? {
+    ): ParkedAnswer? {
         if (runId == null) return null
         val parked = pendingInteractionRepository.getForRun(runId) ?: return null
         if (parked.kind != PendingInteractionKind.APPROVAL) return null
         pendingInteractionRepository.delete(runId)
-        val argsMatch = parked.toolName == resolvedToolName && parked.toolArgs == resolvedToolArgs
-        if (!argsMatch) {
+        val decision = parked.decision ?: return null
+        val sameCall = parked.toolName == resolvedToolName && parked.toolArgs == resolvedToolArgs
+        if (!sameCall) {
             Timber.tag("PipelineDebug").w(
-                "Parked approval of run %s resolved to a different call (%s) — raising a fresh gate",
+                "Parked approval of run %s answered a different call than %s makes now — asking again",
                 runId,
                 resolvedToolName,
             )
         }
-        return parked.decision?.takeIf { argsMatch }
+        return ParkedAnswer(decision = decision, risk = parked.risk, sameCall = sameCall)
+    }
+
+    /**
+     * Fails a call whose live wait ran out and that could not park.
+     *
+     * Non-persisted runs (editor test runs) and storage failures keep the
+     * legacy fail-fast semantics: a park without a durable record would be
+     * unrecoverable. The gate then ends without the user ever getting the
+     * chance to answer it — ABANDONED, not TIMED_OUT.
+     *
+     * @param runId Id of the run, or `null` for a non-persisted run.
+     */
+    private suspend fun FlowCollector<NodeOutput>.abandonTimedOutGate(runId: String?) {
+        recordTriggerHitlEvent(runId, TriggerHitlEvent.Resolved(TriggerHitlResolution.ABANDONED))
+        emit(NodeOutput.State(AgentOrchestratorState.Error("Approval request timed out")))
+        emit(NodeOutput.Result(NodeExecutionResult(error = "Approval request timed out")))
     }
 
     /**
@@ -440,35 +516,55 @@ class ToolInvocationGate @Inject constructor(
      * request snapshot as a [PendingInteraction] and, when durable, replaces
      * the transient approval notification with the persistent one.
      *
+     * The record keeps the request's identity, so the live-phase card and
+     * notification of this request go on answering it after the park — and
+     * the ongoing notification lands in the live one's slot.
+     *
      * @param runId Id of the persisted run being parked.
      * @param sessionId Id of the owning chat session.
-     * @param toolName Tool name of the staged call.
-     * @param arguments Argument string of the staged call.
-     * @param risk Risk classification of the staged call.
+     * @param request The staged call being parked.
      * @return `true` when the park is durable; `false` when the caller must
      *   fall back to failing the run.
      */
-    private suspend fun parkRun(
-        runId: String,
-        sessionId: String,
-        toolName: String,
-        arguments: String,
-        risk: ToolRisk,
-    ): Boolean {
+    private suspend fun parkRun(runId: String, sessionId: String, request: ParkedApprovalRequest): Boolean {
         val saved = pendingInteractionRepository.save(
             PendingInteraction(
                 runId = runId,
                 sessionId = sessionId,
                 kind = PendingInteractionKind.APPROVAL,
-                toolName = toolName,
-                toolArgs = arguments,
-                risk = risk,
+                toolName = request.toolName,
+                toolArgs = request.arguments,
+                risk = request.risk,
                 requestedAt = System.currentTimeMillis(),
+                requestId = request.requestId,
             ),
         )
         if (saved) {
-            approvalNotifier.sendPersistentApprovalRequest(runId, sessionId, toolName, arguments, risk)
+            approvalNotifier.sendPersistentApprovalRequest(
+                runId = runId,
+                sessionId = sessionId,
+                requestId = request.requestId,
+                toolName = request.toolName,
+                arguments = request.arguments,
+                risk = request.risk,
+            )
         }
         return saved
     }
+
+    /**
+     * The staged call a live gate parks, bundled so [parkRun] takes the request
+     * as one value rather than four loose parameters.
+     *
+     * @property requestId Identity of the request, minted when the gate was raised.
+     * @property toolName Tool name of the staged call.
+     * @property arguments Argument string of the staged call.
+     * @property risk Risk classification of the staged call.
+     */
+    private data class ParkedApprovalRequest(
+        val requestId: String,
+        val toolName: String,
+        val arguments: String,
+        val risk: ToolRisk,
+    )
 }

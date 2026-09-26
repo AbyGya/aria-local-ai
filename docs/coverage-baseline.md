@@ -177,8 +177,8 @@ Each is justified below.
 | `app.knotwork.android.presentation.ui.about.AboutScreen*`, `AboutAcknowledgments*` | **New.** Single-file Compose About surface plus its private declarative acknowledgments list. |
 | `app.knotwork.android.presentation.ui.more.MoreScreen*` | **New.** Bottom-nav More hub Composable. The sibling `MoreViewModel` / `MoreUiState` remain inside the gate. |
 | `app.knotwork.android.presentation.ui.settings.provider.ProviderPickerScreen*`, `ProviderDetailScreen*` | **New.** Provider picker and per-provider configuration screens — covered by the catalog Roborazzi snapshots, not JVM unit tests. |
-| `app.knotwork.android.data.tools.local.appfunctions.*` | **New.** AppFunctions callee wrapper (`SearchAppFunction`); the platform `PlatformAppFunctionService` host needs the Android runtime to dispatch. |
-| `app.knotwork.android.data.tools.local.AgentAppFunctionService*`, `LocalAppFunctionManager`, `SearchTool*`, `DelegateTaskTool*` | Tool-execution Android glue (live HTTP / LLM bridge).                    |
+| `app.knotwork.android.data.tools.local.appfunctions.*` | **New.** AppFunctions callee side: the `AgentAppFunctionService` entry point, the service and inventory the compiler generates beside it, and the `SearchAppFunction` body (unit-tested, but in the same package); the service needs the Android 16 AppFunctions host to dispatch. |
+| `app.knotwork.android.data.tools.local.LocalAppFunctionManager`, `SearchTool*`, `DelegateTaskTool*` | Tool-execution Android glue (live HTTP / LLM bridge).                    |
 | `app.knotwork.android.data.logging.CrashlyticsTimberTree*` | Firebase Crashlytics Timber bridge; `getInstance()` paths need Google Play services on Android. |
 
 ## Justified zero-coverage packages
@@ -224,7 +224,7 @@ which is unnecessary for this single-variant project.
 
 ## CI integration — deferred
 
-There is still no `.github/workflows/coverage.yml` job publishing the HTML
+There is still no coverage job under `.github/workflows/` publishing the HTML
 report as a PR artefact. The original reason — the Git remote's PAT lacking the
 `workflow` scope — no longer applies (`.github/workflows/` now holds both
 `check.yml` and `release.yml`); what remains is that the build-failing threshold

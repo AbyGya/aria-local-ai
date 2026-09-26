@@ -15,9 +15,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -88,20 +90,52 @@ class AttachmentStoreImpl @Inject constructor(@ApplicationContext private val co
     }
 
     override suspend fun ingestUri(uri: String): Result<MessageAttachment> {
+        val parsed = uri.toUri()
+        if (!ForeignContentUri.isAcceptable(context, parsed)) {
+            // The URI is caller-supplied (a share can come from any app), so it is
+            // neither logged nor quoted: a warning reaches crash reports after opt-in.
+            return Result.failure(SecurityException("Attachment URI is not another app's content URI"))
+        }
         val bytes = withContext(dispatcher) {
             try {
-                context.contentResolver.openInputStream(uri.toUri())?.use { it.readBytes() }
+                context.contentResolver.openInputStream(parsed)?.use { it.readAtMost(MAX_INGEST_BYTES) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 // Resolver failures vary by source (FileNotFoundException,
                 // SecurityException, provider-specific RuntimeExceptions); any of
-                // them means "could not read", surfaced as a failed Result.
-                Timber.e(e, "Failed to read attachment URI")
+                // them means "could not read", surfaced as a failed Result. Only
+                // the type is logged: a resolver's message usually quotes the URI.
+                Timber.e("Failed to read attachment URI (%s)", e.javaClass.simpleName)
                 null
             }
-        } ?: return Result.failure(IOException("Could not read attachment URI: $uri"))
+        } ?: return Result.failure(IOException("Could not read attachment URI"))
+        if (bytes.size > MAX_INGEST_BYTES) {
+            Timber.w("Refused an attachment larger than the ingest cap")
+            return Result.failure(IOException("Attachment is larger than the ingest cap"))
+        }
         return ingest(bytes)
+    }
+
+    /**
+     * Reads the stream up to one byte past [limit] and stops, so a stream that
+     * never ends — or is simply too large — costs at most `limit + 1` bytes of
+     * memory. The caller refuses anything longer than [limit].
+     *
+     * @param limit Most bytes an acceptable stream may hold.
+     * @return What was read: the whole stream, or `limit + 1` bytes of it.
+     */
+    private fun InputStream.readAtMost(limit: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(READ_CHUNK_BYTES)
+        var remaining = limit.toLong() + 1
+        while (remaining > 0) {
+            val read = read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+            if (read < 0) break
+            out.write(buffer, 0, read)
+            remaining -= read
+        }
+        return out.toByteArray()
     }
 
     override suspend fun delete(path: String): Result<Unit> = withContext(dispatcher) {
@@ -148,6 +182,12 @@ class AttachmentStoreImpl @Inject constructor(@ApplicationContext private val co
     override suspend fun sizeBytes(path: String): Long = withContext(dispatcher) {
         val target = resolveSafe(path)
         if (target != null && target.isFile) target.length() else 0L
+    }
+
+    override suspend fun deleteAll(): Boolean = withContext(dispatcher) {
+        // Not rootDir(): that would recreate the directory it is asked to remove.
+        val dir = File(context.filesDir, ATTACHMENTS_DIR)
+        dir.deleteRecursively()
     }
 
     /**
@@ -259,6 +299,21 @@ class AttachmentStoreImpl @Inject constructor(@ApplicationContext private val co
     companion object {
         /** Directory name under [Context.filesDir] holding attachment files. */
         const val ATTACHMENTS_DIR = "attachments"
+
+        /**
+         * Most bytes [ingestUri] reads from a content URI before it refuses the
+         * attachment: 64 MiB.
+         *
+         * The stream comes from another app — a share from any installed app, a
+         * picked file — and used to be read into memory whole, so an endless or
+         * huge one ended the process. The value is a judgement, not a measurement:
+         * well above the largest camera JPEG in circulation (a 200 MP capture is
+         * tens of megabytes), and a heap a phone can hold for one decode.
+         */
+        const val MAX_INGEST_BYTES = 64 * 1024 * 1024
+
+        /** Buffer size of the bounded read in [ingestUri]. */
+        private const val READ_CHUNK_BYTES = 64 * 1024
 
         /**
          * Longest-side pixel cap for a stored attachment. Aspect ratio is always

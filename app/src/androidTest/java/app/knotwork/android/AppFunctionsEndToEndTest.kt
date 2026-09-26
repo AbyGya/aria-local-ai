@@ -233,7 +233,7 @@ class AppFunctionsEndToEndTest {
      * instrumented test run is prohibitively expensive) and real `ToolRepository` /
      * `SettingsRepository`. Drives `execute(...)` against a TOOL node configured to
      * call the probe's qualified echo, observes the [AgentOrchestratorState.WaitingForApproval]
-     * emission, and then calls `resumeWithApproval(sessionId, true)` to release the
+     * emission, and then calls `resumeWithApproval(sessionId, requestId, true)` to release the
      * suspended invocation. The final [NodeOutput.Result] must carry the echoed message.
      */
     @Test
@@ -268,7 +268,9 @@ class AppFunctionsEndToEndTest {
                             // this is deterministic regardless of emulator load.
                             launch {
                                 awaitPendingApproval(executor, sessionId)
-                                executor.resumeWithApproval(sessionId, true)
+                                // Answer the request the gate is waiting on, as the card would.
+                                val requestId = requireNotNull(executor.pendingApprovalFor(sessionId)).requestId
+                                executor.resumeWithApproval(sessionId, requestId, true)
                             }
                         }
                     }
@@ -304,7 +306,7 @@ class AppFunctionsEndToEndTest {
      * Scenario 3 — Callee-side: the agent exposes `search_tool` to outside callers.
      *
      * Builds an [ExecuteAppFunctionRequest] for the KSP-generated id of
-     * `SearchAppFunction.invoke` (see [SEARCH_TOOL_ID]) and dispatches it through the
+     * `AgentAppFunctionService.search` (see [SEARCH_TOOL_ID]) and dispatches it through the
      * system [AppFunctionManager], exercising the same code path the probe's MainActivity
      * uses for manual smoke checks. The response is parsed back through the platform
      * [GenericDocument]; the test asserts only that the call succeeded and the return
@@ -317,16 +319,15 @@ class AppFunctionsEndToEndTest {
         val manager = AppFunctionManager.getInstance(context)
             ?: error("AppFunctionManager not available — Android 16+ required.")
 
-        val packages = withTimeoutOrNull(PROBE_DISCOVERY_TIMEOUT_MS) {
-            manager.observeAppFunctions(AppFunctionSearchSpec(packageNames = setOf(AGENT_PACKAGE))).first()
-        } ?: error("AppFunctionManager.observeAppFunctions timed out for agent package")
-        val metadata = packages
-            .flatMap { it.appFunctions }
+        val published = withTimeoutOrNull(PROBE_DISCOVERY_TIMEOUT_MS) {
+            manager.searchAppFunctions(AppFunctionSearchSpec(packageNames = setOf(AGENT_PACKAGE)))
+        } ?: error("AppFunctionManager.searchAppFunctions timed out for agent package")
+        val metadata = published
             .firstOrNull { it.id == SEARCH_TOOL_ID }
             ?: error(
                 "Agent app does not expose `$SEARCH_TOOL_ID` — check that " +
-                    "`SearchAppFunction.invoke` is still annotated with `@AppFunction` so " +
-                    "the KSP compiler publishes it through `app_functions_v2.xml`.",
+                    "`AgentAppFunctionService.search` is still annotated with `@AppFunction` " +
+                    "so the KSP compiler publishes it through `knotwork_app_functions.xml`.",
             )
 
         val parameters = AppFunctionData.Builder(metadata.parameters, metadata.components)
@@ -440,17 +441,17 @@ class AppFunctionsEndToEndTest {
         val rawPlatformResult = runCatching {
             val manager = AppFunctionManager.getInstance(applicationContext)
                 ?: return@runCatching "AppFunctionManager.getInstance returned null"
-            val packages = manager.observeAppFunctions(AppFunctionSearchSpec()).first()
-            packages.joinToString { pkg ->
-                "${pkg.packageName}:${pkg.appFunctions.map { it.id }}"
-            }
-        }.getOrElse { "AppFunctionManager.observeAppFunctions threw: ${it::class.java.simpleName}: ${it.message}" }
+            manager.searchAppFunctions(AppFunctionSearchSpec())
+                .groupBy({ it.packageName }, { it.id })
+                .entries
+                .joinToString { (pkg, ids) -> "$pkg:$ids" }
+        }.getOrElse { "AppFunctionManager.searchAppFunctions threw: ${it::class.java.simpleName}: ${it.message}" }
         val permissionDump = runShell(automation, "pm list permissions -g -f android.permission.EXECUTE_APP_FUNCTIONS")
             .lineSequence().filter { it.isNotBlank() }.take(20).joinToString("\n      ")
         return buildString {
             appendLine("Probe AppFunction `echo` was not discovered within ${PROBE_DISCOVERY_TIMEOUT_MS}ms.")
             appendLine("  Last observed (agent) catalogue: $lastObservedTools")
-            appendLine("  Raw AppFunctionManager.observeAppFunctions: [$rawPlatformResult]")
+            appendLine("  Raw AppFunctionManager.searchAppFunctions: [$rawPlatformResult]")
             appendLine("  pm list packages $PROBE_PACKAGE: '${probeInstalled.trim()}'")
             appendLine("  $AGENT_PACKAGE EXECUTE_APP_FUNCTIONS (dumpsys package): '$agentPermLine'")
             appendLine("  $PROBE_PACKAGE EXECUTE_APP_FUNCTIONS (dumpsys package): '$probePermLine'")
@@ -754,7 +755,13 @@ class AppFunctionsEndToEndTest {
         coEvery { fakeLoadModel.invoke() } returns DomainResult.Success(Unit)
 
         val silentNotifier = object : ApprovalNotifier {
-            override fun sendApprovalRequest(sessionId: String, toolName: String, arguments: String, risk: ToolRisk) {
+            override fun sendApprovalRequest(
+                sessionId: String,
+                requestId: String,
+                toolName: String,
+                arguments: String,
+                risk: ToolRisk,
+            ) {
                 // Notification side effects are not part of this test's contract; the gate
                 // suspension is observed through the WaitingForApproval state emission, not
                 // via a system notification assertion. Swallowing here also keeps the test
@@ -764,6 +771,7 @@ class AppFunctionsEndToEndTest {
             override fun sendPersistentApprovalRequest(
                 runId: String,
                 sessionId: String,
+                requestId: String,
                 toolName: String,
                 arguments: String,
                 risk: ToolRisk,
@@ -771,8 +779,12 @@ class AppFunctionsEndToEndTest {
                 // Same rationale: the park is asserted through the durable record.
             }
 
-            override fun cancelApprovalNotification(sessionId: String) {
+            override fun cancelApprovalNotification(requestId: String) {
                 // No notification was posted, nothing to cancel.
+            }
+
+            override fun cancelPreUpdateNotification(sessionId: String) {
+                // No earlier release posted anything on the test device either.
             }
         }
 
@@ -819,15 +831,17 @@ class AppFunctionsEndToEndTest {
 
         /**
          * Canonical AppFunction wire id generated by the KSP compiler from
-         * `@AppFunction`-annotated `SearchAppFunction.invoke`. The literal embeds the
+         * `@AppFunction`-annotated `AgentAppFunctionService.search`. The literal embeds the
          * backticks around `data` because the AppFunctions compiler emits Kotlin
          * source-level package escaping into the id string when a package segment
          * collides with a soft keyword — see the generated
-         * `SearchAppFunctionIds.INVOKE_ID` constant. The platform indexer treats the id
-         * as an opaque string, so the backticks must travel with every request.
+         * `KnotworkAppFunctionService.FUNCTION_ID_SEARCH` constant. Written out rather than
+         * referenced: it is the string an outside caller has to send, so a change to it is
+         * a change to the published contract and should fail here. The platform indexer
+         * treats the id as an opaque string, so the backticks must travel with every request.
          */
         const val SEARCH_TOOL_ID =
-            "app.knotwork.android.`data`.tools.local.appfunctions.SearchAppFunction#invoke"
+            "app.knotwork.android.`data`.tools.local.appfunctions.AgentAppFunctionService#search"
 
         const val LOG_TAG = "AppFunctionsE2E"
         const val PROBE_DISCOVERY_TIMEOUT_MS = 15_000L

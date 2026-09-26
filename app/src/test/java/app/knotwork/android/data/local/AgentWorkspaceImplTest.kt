@@ -34,12 +34,17 @@ class AgentWorkspaceImplTest {
     @get:Rule
     val tempFolder = TemporaryFolder()
 
+    /** Stands in for the app's cache directory, where share copies are staged. */
+    @get:Rule
+    val cacheFolder = TemporaryFolder()
+
     private lateinit var context: Context
 
     @Before
     fun setup() {
         context = mockk()
         every { context.filesDir } returns tempFolder.root
+        every { context.cacheDir } returns cacheFolder.root
     }
 
     // region helpers
@@ -47,11 +52,18 @@ class AgentWorkspaceImplTest {
     private fun workspaceWith(
         maxFileSize: Long = DEFAULT_FILE_SIZE,
         maxTotal: Long = DEFAULT_TOTAL,
+        maxEntries: Int? = null,
     ): AgentWorkspaceImpl {
         val settings = mockk<SettingsRepository>()
         every { settings.workspaceMaxFileSizeBytes } returns flowOf(maxFileSize)
         every { settings.workspaceMaxTotalBytes } returns flowOf(maxTotal)
-        return AgentWorkspaceImpl(context, settings)
+        // Without an explicit ceiling, the constructor Hilt uses — so every other test
+        // runs against the shipped entry ceiling, not a test value.
+        return if (maxEntries == null) {
+            AgentWorkspaceImpl(context, settings)
+        } else {
+            AgentWorkspaceImpl(context, settings, maxEntries)
+        }
     }
 
     /** The on-disk workspace root the implementation manages. */
@@ -389,13 +401,16 @@ class AgentWorkspaceImplTest {
         assertSuccess(workspace.writeText("a", "12345")) // 5 bytes; primes the cache to 5
         putRawFile("ext.txt", ByteArray(10) { 'x'.code.toByte() }) // +10 on disk, behind the cache's back
 
-        // Writing under "a" (a regular file, not a directory) throws partway; the fix
-        // invalidates the cache instead of leaving it stuck at 5.
+        // A directory squatting on the write's scratch name makes the write throw
+        // partway, after every refusal check has passed (a path through a file is
+        // refused up front now); the fix invalidates the cache instead of leaving
+        // it stuck at 5.
+        File(workspaceRoot(), "b.txt.knotwork-tmp").mkdirs()
         try {
-            workspace.writeText("a/b.txt", "x")
-            fail("expected the parent-is-a-file write to throw")
+            workspace.writeText("b.txt", "x")
+            fail("expected the write onto a directory-shaped scratch file to throw")
         } catch (expected: IOException) {
-            // The write into a path whose parent is a regular file is supposed to fail.
+            // Staging into a path that is a directory is supposed to fail.
         }
 
         // The next quota check must recompute the true 15 bytes on disk: 15 + 20 = 35 > 30.
@@ -660,6 +675,33 @@ class AgentWorkspaceImplTest {
 
     // endregion
 
+    // region eraseAll
+
+    @Test
+    fun `given files when eraseAll then the workspace is gone and usage restarts at zero`() = runTest {
+        val workspace = workspaceWith()
+        assertSuccess(workspace.writeText("a.txt", "12345"))
+        assertSuccess(workspace.writeText("dir/nested/b.txt", "678"))
+        assertEquals(8L, assertSuccess(workspace.usage()).usedBytes) // primes the cached tally
+
+        assertTrue(workspace.eraseAll())
+
+        assertFalse(workspaceRoot().exists())
+        // The cached tally went with the files: the quota does not count what is gone.
+        assertEquals(0L, assertSuccess(workspace.usage()).usedBytes)
+        assertEquals(emptyList<Any>(), assertSuccess(workspace.list()))
+        // The workspace is usable again straight away.
+        assertSuccess(workspace.writeText("fresh.txt", "ok"))
+    }
+
+    @Test
+    fun `given no workspace directory yet when eraseAll then it reports nothing left`() = runTest {
+        assertTrue(workspaceWith().eraseAll())
+        assertFalse(workspaceRoot().exists())
+    }
+
+    // endregion
+
     // region readTextPreview
 
     @Test
@@ -810,8 +852,359 @@ class AgentWorkspaceImplTest {
 
     // endregion
 
+    // region share copies
+
+    /** The share staging directory the workspace copies into. */
+    private fun shareDir() = File(cacheFolder.root, "shared")
+
+    @Test
+    fun `given a file when staged for share then an identical copy lands in the share cache`() = runTest {
+        val workspace = workspaceWith()
+        assertSuccess(workspace.writeText("reports/salary.md", "the figures"))
+
+        val staged = File(assertSuccess(workspace.stageForShare("reports/salary.md")))
+
+        assertEquals("salary.md", staged.name)
+        assertEquals("the figures", staged.readText())
+        assertTrue("the copy lives under the share cache", staged.canonicalPath.startsWith(shareDir().canonicalPath))
+    }
+
+    @Test
+    fun `given a staged copy when its file is deleted then the copy is deleted too`() = runTest {
+        val workspace = workspaceWith()
+        assertSuccess(workspace.writeText("reports/salary.md", "the figures"))
+        assertSuccess(workspace.writeText("notes.md", "keep me"))
+        val salaryCopy = File(assertSuccess(workspace.stageForShare("reports/salary.md")))
+        val notesCopy = File(assertSuccess(workspace.stageForShare("notes.md")))
+
+        assertSuccess(workspace.delete("reports/salary.md"))
+
+        // Before: "delete" on the Files screen left this byte-identical copy behind.
+        assertFalse("a deleted file must leave no share copy", salaryCopy.exists())
+        assertTrue("another file's copy is untouched", notesCopy.exists())
+    }
+
+    @Test
+    fun `given a file deleted by a path spelled differently then its copy is still found`() = runTest {
+        val workspace = workspaceWith()
+        assertSuccess(workspace.writeText("a/b.md", "x"))
+        val copy = File(assertSuccess(workspace.stageForShare("a/b.md")))
+
+        assertSuccess(workspace.delete("a/./../a/b.md"))
+
+        assertFalse(copy.exists())
+    }
+
+    @Test
+    fun `given a fresh share when another file is shared then the first copy survives`() = runTest {
+        val workspace = workspaceWith()
+        assertSuccess(workspace.writeText("a.md", "first"))
+        assertSuccess(workspace.writeText("b.md", "second"))
+        val first = File(assertSuccess(workspace.stageForShare("a.md")))
+
+        assertSuccess(workspace.stageForShare("b.md"))
+
+        // Before: every share wiped the whole directory, pulling this copy away from
+        // an app that may not have read it yet.
+        assertTrue("a share still being read must not be removed by the next", first.exists())
+    }
+
+    @Test
+    fun `given a copy older than the retention when another file is shared then the old copy is pruned`() = runTest {
+        val workspace = workspaceWith()
+        assertSuccess(workspace.writeText("a.md", "first"))
+        assertSuccess(workspace.writeText("b.md", "second"))
+        val old = File(assertSuccess(workspace.stageForShare("a.md")))
+        val longAgo = System.currentTimeMillis() - 2 * ONE_HOUR_MS
+        old.setLastModified(longAgo)
+        old.parentFile!!.setLastModified(longAgo)
+
+        assertSuccess(workspace.stageForShare("b.md"))
+
+        assertFalse(old.parentFile!!.exists())
+    }
+
+    @Test
+    fun `given a missing or escaping path when staged for share then it fails without a copy`() = runTest {
+        val workspace = workspaceWith()
+
+        assertFailure(workspace.stageForShare("nope.md"), WorkspaceError.NotFound)
+        assertFailure(workspace.stageForShare("../escape.md"), WorkspaceError.PathOutsideWorkspace)
+        assertTrue(shareDir().listFiles().orEmpty().isEmpty())
+    }
+
+    // endregion
+
+    // region directories and the entry ceiling
+
+    @Test
+    fun `given a nested file when it is deleted then its emptied directories go with it`() = runTest {
+        val workspace = workspaceWith()
+        assertSuccess(workspace.writeText("a/b/c/f.txt", "x"))
+
+        assertSuccess(workspace.delete("a/b/c/f.txt"))
+
+        // Before the fix the three directories survived: free in the quota, absent from
+        // every listing, and removable by no action in the app.
+        assertFalse(File(workspaceRoot(), "a").exists())
+        assertTrue(workspaceRoot().isDirectory)
+    }
+
+    @Test
+    fun `given a sibling in an ancestor when a nested file is deleted then pruning stops at that ancestor`() = runTest {
+        val workspace = workspaceWith()
+        assertSuccess(workspace.writeText("a/keep.txt", "k"))
+        assertSuccess(workspace.writeText("a/b/c/f.txt", "x"))
+
+        assertSuccess(workspace.delete("a/b/c/f.txt"))
+
+        assertFalse(File(workspaceRoot(), "a/b").exists())
+        assertEquals("k", assertSuccess(workspace.readText("a/keep.txt")))
+    }
+
+    @Test
+    fun `given empty directories left behind earlier when the workspace is next measured then they are removed`() =
+        runTest {
+            assertTrue(File(workspaceRoot(), "old/x/y").mkdirs())
+            putRawFile("kept/file.txt", "k".toByteArray())
+            val workspace = workspaceWith()
+
+            assertSuccess(workspace.usage())
+
+            assertFalse(File(workspaceRoot(), "old").exists())
+            assertTrue(File(workspaceRoot(), "kept/file.txt").isFile)
+        }
+
+    @Test
+    fun `given the entry ceiling is reached when a new file is written then QuotaExceeded`() = runTest {
+        val workspace = workspaceWith(maxEntries = 3)
+        // `a`, `a/b` and `f.txt`: three entries, exactly the ceiling.
+        assertSuccess(workspace.writeText("a/b/f.txt", "x"))
+
+        assertFailure(workspace.writeText("c.txt", "x"), WorkspaceError.QuotaExceeded)
+        assertFalse(File(workspaceRoot(), "c.txt").exists())
+        // Replacing an existing file creates no entry, so it is still allowed at the ceiling.
+        assertSuccess(workspace.writeText("a/b/f.txt", "y", overwrite = true))
+    }
+
+    @Test
+    fun `given a nested write that needs more entries than remain when writeText then nothing is created`() = runTest {
+        val workspace = workspaceWith(maxEntries = 2)
+
+        // The two directories count as well as the file: three entries against a ceiling of two.
+        assertFailure(workspace.writeText("a/b/f.txt", "x"), WorkspaceError.QuotaExceeded)
+        assertFalse(File(workspaceRoot(), "a").exists())
+    }
+
+    @Test
+    fun `given a delete at the entry ceiling when a new file is written then the freed entries are reusable`() =
+        runTest {
+            val workspace = workspaceWith(maxEntries = 3)
+            assertSuccess(workspace.writeText("a/b/f.txt", "x"))
+
+            assertSuccess(workspace.delete("a/b/f.txt"))
+
+            // The delete freed the file and both directories; the cached count must follow.
+            assertSuccess(workspace.writeText("d/e/g.txt", "x"))
+        }
+
+    @Test
+    fun `given the entry ceiling is reached when importBytes then QuotaExceeded`() = runTest {
+        val workspace = workspaceWith(maxEntries = 1)
+        assertSuccess(workspace.writeText("a.txt", "x"))
+
+        assertFailure(
+            workspace.importBytes("b.txt", ByteArrayInputStream(byteArrayOf(1)), overwrite = false),
+            WorkspaceError.QuotaExceeded,
+        )
+    }
+
+    @Test
+    fun `given entries already on disk when the first write is checked then they count against the ceiling`() =
+        runTest {
+            putRawFile("one.txt", "1".toByteArray())
+            putRawFile("two.txt", "2".toByteArray())
+            val workspace = workspaceWith(maxEntries = 2)
+
+            assertFailure(workspace.writeText("three.txt", "3"), WorkspaceError.QuotaExceeded)
+        }
+
+    // endregion
+
+    // region the walk behind listings and the quota
+
+    @Test
+    fun `given a symlink to an outside directory when usage then the outside bytes are not charged`() = runTest {
+        val outside = tempFolder.newFolder("outside")
+        File(outside, "secret.txt").writeText("0123456789")
+        workspaceRoot().mkdirs()
+        try {
+            Files.createSymbolicLink(File(workspaceRoot(), "link").toPath(), outside.toPath())
+        } catch (e: Exception) {
+            assumeNoException("Symlinks unsupported on this platform", e)
+        }
+        val workspace = workspaceWith()
+        assertSuccess(workspace.writeText("inside.txt", "ok"))
+
+        // `list()` already dropped the escaping entry; the quota walk used to add its bytes.
+        assertEquals(2L, assertSuccess(workspace.usage()).usedBytes)
+    }
+
+    @Test
+    fun `given a symlink cycle when list and usage then each file appears once`() = runTest {
+        workspaceRoot().mkdirs()
+        putRawFile("a.txt", "12345".toByteArray())
+        try {
+            Files.createSymbolicLink(File(workspaceRoot(), "loop").toPath(), workspaceRoot().toPath())
+        } catch (e: Exception) {
+            assumeNoException("Symlinks unsupported on this platform", e)
+        }
+        val workspace = workspaceWith()
+
+        assertEquals(listOf("a.txt"), assertSuccess(workspace.list()).map { it.relativePath })
+        assertEquals(5L, assertSuccess(workspace.usage()).usedBytes)
+    }
+
+    @Test
+    fun `given a symlink to an empty outside directory when the workspace is measured then the target survives`() =
+        runTest {
+            val outside = tempFolder.newFolder("outside-empty")
+            File(outside, "nested").mkdirs()
+            workspaceRoot().mkdirs()
+            try {
+                Files.createSymbolicLink(File(workspaceRoot(), "link").toPath(), outside.toPath())
+            } catch (e: Exception) {
+                assumeNoException("Symlinks unsupported on this platform", e)
+            }
+
+            assertSuccess(workspaceWith().usage())
+
+            // Pruning empty directories must never reach through a link.
+            assertTrue(File(outside, "nested").isDirectory)
+        }
+
+    // endregion
+
+    // region names
+
+    @Test
+    fun `given a name with a line break when writeText then InvalidPath and nothing is created`() = runTest {
+        val workspace = workspaceWith()
+
+        assertFailure(workspace.writeText("notes.md\nforged.txt", "x"), WorkspaceError.InvalidPath)
+        assertTrue(workspaceRoot().listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun `given a name with a lone surrogate when writeText then InvalidPath and nothing is created`() = runTest {
+        // The JVM would write it as "?.txt" and report success; on the device the
+        // name is one java.nio cannot represent, and it jammed every later walk.
+        val workspace = workspaceWith()
+
+        assertFailure(workspace.writeText("\uD800.txt", "x"), WorkspaceError.InvalidPath)
+        assertTrue(workspaceRoot().listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun `given a path that runs through an existing file when written or appended then InvalidPath`() = runTest {
+        // A directory level that is a file (ENOTDIR) is a path the filesystem
+        // rejects; the promise is a typed refusal, not an exception.
+        val workspace = workspaceWith()
+        workspace.writeText("notes.md", "x")
+
+        assertFailure(workspace.writeText("notes.md/x.txt", "y"), WorkspaceError.InvalidPath)
+        assertFailure(workspace.appendText("notes.md/x.txt", "y"), WorkspaceError.InvalidPath)
+    }
+
+    @Test
+    fun `given a directory name with a tab when writeText then InvalidPath`() = runTest {
+        assertFailure(workspaceWith().writeText("a\tb/f.txt", "x"), WorkspaceError.InvalidPath)
+    }
+
+    @Test
+    fun `given a new name with a control character when appendText then InvalidPath`() = runTest {
+        assertFailure(workspaceWith().appendText("log\r.txt", "x"), WorkspaceError.InvalidPath)
+    }
+
+    @Test
+    fun `given an imported name with a line break when importBytes then InvalidPath`() = runTest {
+        val source = ByteArrayInputStream("x".toByteArray())
+
+        assertFailure(
+            workspaceWith().importBytes("a\nb.txt", source, overwrite = false),
+            WorkspaceError.InvalidPath,
+        )
+    }
+
+    @Test
+    fun `given a file whose name predates the rules when read overwritten and deleted then all succeed`() = runTest {
+        putRawFile("old\nname.txt", "legacy".toByteArray())
+        val workspace = workspaceWith()
+
+        assertEquals("legacy", assertSuccess(workspace.readText("old\nname.txt")))
+        assertSuccess(workspace.writeText("old\nname.txt", "new", overwrite = true))
+        assertEquals(listOf("old\nname.txt"), assertSuccess(workspace.list()).map { it.relativePath })
+        assertSuccess(workspace.delete("old\nname.txt"))
+    }
+
+    @Test
+    fun `given a path with a NUL byte when any operation then InvalidPath instead of an exception`() = runTest {
+        val workspace = workspaceWith()
+        val path = "a${Char(0)}b.txt"
+
+        assertFailure(workspace.readText(path), WorkspaceError.InvalidPath)
+        assertFailure(workspace.writeText(path, "x"), WorkspaceError.InvalidPath)
+        assertFailure(workspace.delete(path), WorkspaceError.InvalidPath)
+        assertFailure(workspace.resolve(path), WorkspaceError.InvalidPath)
+    }
+
+    @Test
+    fun `given a name at the byte limit when writeText then succeeds`() = runTest {
+        val name = "n".repeat(MAX_NAME_BYTES)
+
+        assertSuccess(workspaceWith().writeText(name, "x"))
+    }
+
+    @Test
+    fun `given a name one byte over the limit when writeText then InvalidPath instead of an exception`() = runTest {
+        val name = "n".repeat(MAX_NAME_BYTES + 1)
+
+        assertFailure(workspaceWith().writeText(name, "x"), WorkspaceError.InvalidPath)
+    }
+
+    @Test
+    fun `given a path at the byte limit when writeText then succeeds`() = runTest {
+        assertEquals(MAX_PATH_BYTES, pathOfBytes(MAX_PATH_BYTES).length)
+
+        assertSuccess(workspaceWith().writeText(pathOfBytes(MAX_PATH_BYTES), "x"))
+    }
+
+    @Test
+    fun `given a path one byte over the limit when writeText then InvalidPath`() = runTest {
+        assertFailure(workspaceWith().writeText(pathOfBytes(MAX_PATH_BYTES + 1), "x"), WorkspaceError.InvalidPath)
+    }
+
+    /** An ASCII path of exactly [bytes] bytes whose every segment stays under the name limit. */
+    private fun pathOfBytes(bytes: Int): String {
+        val segment = "s".repeat(SEGMENT_FOR_PATH_TESTS)
+        val builder = StringBuilder()
+        while (builder.length + 1 + SEGMENT_FOR_PATH_TESTS < bytes) builder.append(segment).append('/')
+        return builder.append("f".repeat(bytes - builder.length)).toString()
+    }
+
+    // endregion
+
     private companion object {
         const val DEFAULT_FILE_SIZE = 5L * 1024 * 1024
+
+        /** Mirrors `WorkspaceNamePolicy.MAX_NAME_BYTES`, kept literal so the test pins the value. */
+        const val MAX_NAME_BYTES = 242
+
+        /** Mirrors `WorkspaceNamePolicy.MAX_PATH_BYTES`, kept literal so the test pins the value. */
+        const val MAX_PATH_BYTES = 512
+
+        /** Segment length used to build long paths out of legal names. */
+        const val SEGMENT_FOR_PATH_TESTS = 100
         const val DEFAULT_TOTAL = 100L * 1024 * 1024
 
         /** Mirrors `AgentWorkspaceImpl.RESERVED_TMP_SUFFIX`. */
@@ -819,5 +1212,7 @@ class AgentWorkspaceImplTest {
 
         /** Mirrors `AgentWorkspaceImpl.TEXT_SNIFF_BYTES`. */
         const val SNIFF_BYTES = 8 * 1024
+
+        const val ONE_HOUR_MS = 60L * 60L * 1000L
     }
 }

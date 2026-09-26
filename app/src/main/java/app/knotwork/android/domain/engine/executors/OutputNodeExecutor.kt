@@ -105,7 +105,7 @@ class OutputNodeExecutor @Inject constructor(
             } catch (e: Exception) {
                 Timber.tag(
                     "PipelineDebug",
-                ).e(e, "[NODE_ERR] type=${node.type.name} id=${node.id} error in OutputNodeExecutor generation")
+                ).e(e, "[NODE_ERR] type=%s id=%s error in OutputNodeExecutor generation", node.type.name, node.id)
                 emit(NodeOutput.State(AgentOrchestratorState.Error(e.message ?: "Unknown error")))
                 emit(NodeOutput.Result(NodeExecutionResult(error = e.message)))
                 return@flow
@@ -141,6 +141,9 @@ class OutputNodeExecutor @Inject constructor(
                         content = finalOutput,
                         timestamp = System.currentTimeMillis(),
                         modelName = generatingModelName,
+                        // An empty generation falls back to the input above,
+                        // which no model wrote here.
+                        relayed = generatedText.isEmpty(),
                     ),
                 )
             }
@@ -157,6 +160,9 @@ class OutputNodeExecutor @Inject constructor(
                         content = inputText,
                         timestamp = System.currentTimeMillis(),
                         modelName = generatingModelName,
+                        // Echo mode saves its input as the reply: a model's text
+                        // behind a model node, a tool's result behind a TOOL.
+                        relayed = !scope.inputWrittenByModel,
                     ),
                 )
             }

@@ -1049,4 +1049,105 @@ class AppDatabaseMigrationTest {
                 assertFalse("Column $column must be nullable: $sql", sql.uppercase().contains("NOT NULL"))
             }
     }
+
+    @Test
+    fun `MIGRATION_61_62 targets versions 61 to 62`() {
+        val migration = AppDatabase.MIGRATION_61_62
+
+        assertEquals(61, migration.startVersion)
+        assertEquals(62, migration.endVersion)
+    }
+
+    @Test
+    fun `MIGRATION_61_62 adds a nullable request id and back-fills approval rows with their run id`() {
+        val db = mockk<SupportSQLiteDatabase>(relaxed = true)
+        val statements = mutableListOf<String>()
+
+        AppDatabase.MIGRATION_61_62.migrate(db)
+
+        verify(exactly = 2) { db.execSQL(capture(statements)) }
+        val (alter, backfill) = statements
+        // Nullable with no default, matching the entity: clarifications and
+        // ceiling pauses have no approval request to name.
+        assertTrue(alter, alter.contains("ALTER TABLE `pending_interactions` ADD COLUMN `requestId` TEXT"))
+        assertFalse(alter, alter.uppercase().contains("NOT NULL"))
+        assertFalse(alter, alter.uppercase().contains("DEFAULT"))
+        // The back-fill is what keeps a request that was waiting across the
+        // update answerable: its notification names only the run.
+        assertTrue(backfill, backfill.contains("UPDATE `pending_interactions` SET `requestId` = `runId`"))
+        assertTrue(backfill, backfill.contains("WHERE `kind` = 'APPROVAL'"))
+    }
+
+    @Test
+    fun `MIGRATION_62_63 targets versions 62 to 63`() {
+        val migration = AppDatabase.MIGRATION_62_63
+
+        assertEquals(62, migration.startVersion)
+        assertEquals(63, migration.endVersion)
+    }
+
+    @Test
+    fun `MIGRATION_62_63 adds the imported flag NOT NULL defaulting to written-on-this-device`() {
+        val db = mockk<SupportSQLiteDatabase>(relaxed = true)
+        val statement = slot<String>()
+
+        AppDatabase.MIGRATION_62_63.migrate(db)
+
+        verify(exactly = 1) { db.execSQL(capture(statement)) }
+        // NOT NULL with DEFAULT 0 must match the entity's `@ColumnInfo(defaultValue = "0")`
+        // or Room's schema validation rejects the migrated database.
+        assertEquals(
+            "ALTER TABLE `chat_messages` ADD COLUMN `imported` INTEGER NOT NULL DEFAULT 0",
+            statement.captured,
+        )
+    }
+
+    @Test
+    fun `MIGRATION_63_64 targets versions 63 to 64`() {
+        val migration = AppDatabase.MIGRATION_63_64
+
+        assertEquals(63, migration.startVersion)
+        assertEquals(64, migration.endVersion)
+    }
+
+    @Test
+    fun `MIGRATION_63_64 creates the background prompts table exactly as the entity declares it`() {
+        val db = mockk<SupportSQLiteDatabase>(relaxed = true)
+        val statement = slot<String>()
+
+        AppDatabase.MIGRATION_63_64.migrate(db)
+
+        verify(exactly = 1) { db.execSQL(capture(statement)) }
+        // Must match the exported v64 schema's createSql, or Room's validation
+        // rejects the migrated database.
+        assertEquals(
+            "CREATE TABLE IF NOT EXISTS `background_prompts` " +
+                "(`id` TEXT NOT NULL, `prompt` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+            statement.captured,
+        )
+    }
+
+    @Test
+    fun `MIGRATION_64_65 targets versions 64 to 65`() {
+        val migration = AppDatabase.MIGRATION_64_65
+
+        assertEquals(64, migration.startVersion)
+        assertEquals(65, migration.endVersion)
+    }
+
+    @Test
+    fun `MIGRATION_64_65 adds the relayed flag NOT NULL defaulting to not relayed`() {
+        val db = mockk<SupportSQLiteDatabase>(relaxed = true)
+        val statement = slot<String>()
+
+        AppDatabase.MIGRATION_64_65.migrate(db)
+
+        verify(exactly = 1) { db.execSQL(capture(statement)) }
+        // NOT NULL with DEFAULT 0 must match the entity's `@ColumnInfo(defaultValue = "0")`
+        // or Room's schema validation rejects the migrated database.
+        assertEquals(
+            "ALTER TABLE `chat_messages` ADD COLUMN `relayed` INTEGER NOT NULL DEFAULT 0",
+            statement.captured,
+        )
+    }
 }

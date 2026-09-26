@@ -1,6 +1,7 @@
 package app.knotwork.android.domain.engine.executors
 
 import app.knotwork.android.domain.constants.DefaultPrompts
+import app.knotwork.android.domain.engine.CloudErrorSanitizer
 import app.knotwork.android.domain.engine.LlmInferenceEngine
 import app.knotwork.android.domain.engine.executors.ToolCallParser.ToolCall
 import app.knotwork.android.domain.engine.structured.CloudStructuredInferenceClientFactory
@@ -18,6 +19,7 @@ import app.knotwork.android.domain.models.NodeExecutionResult
 import app.knotwork.android.domain.models.NodeModel
 import app.knotwork.android.domain.models.NodeOutput
 import app.knotwork.android.domain.models.Result
+import app.knotwork.android.domain.prompt.ChatTranscript
 import app.knotwork.android.domain.repositories.SettingsRepository
 import app.knotwork.android.domain.repositories.ToolRepository
 import app.knotwork.android.domain.usecases.LoadModelUseCase
@@ -63,15 +65,18 @@ class ToolNodeExecutor @Inject constructor(
 ) : NodeExecutor {
 
     /**
-     * Completes the suspended approval request for [sessionId] with the user's decision.
-     * Delegates to the shared [ToolInvocationGate]; kept here so existing callers
-     * (`GraphExecutionEngine`, the AppFunctions E2E entry point) keep working unchanged.
+     * Completes the live approval request [requestId] of [sessionId] with the
+     * user's decision. Delegates to the shared [ToolInvocationGate]; kept here so
+     * existing callers (`GraphExecutionEngine`, the AppFunctions E2E test) keep
+     * working unchanged.
      *
      * @param sessionId chat session id whose pending approval is being resolved.
+     * @param requestId identity of the request the decision was given for.
      * @param isApproved `true` if the user approved tool execution, `false` to deny it.
+     * @return `true` when the decision settled the live request it names.
      */
-    fun resumeWithApproval(sessionId: String, isApproved: Boolean) =
-        toolInvocationGate.resumeWithApproval(sessionId, isApproved)
+    fun resumeWithApproval(sessionId: String, requestId: String, isApproved: Boolean): Boolean =
+        toolInvocationGate.resumeWithApproval(sessionId, requestId, isApproved)
 
     /**
      * Returns the approval request the run of [sessionId] is currently suspended on, or
@@ -129,8 +134,10 @@ class ToolNodeExecutor @Inject constructor(
         } catch (e: Exception) {
             // An engine-level failure during argument generation (not a validation
             // miss) — surface it as a graceful node error rather than tearing down the run.
-            Timber.tag("PipelineDebug").e(e, "Error generating tool arguments via LLM")
-            val errorMsg = "Error generating tool arguments: ${e.message}"
+            // The engine may be a cloud provider, whose error can quote its key (see
+            // CloudErrorSanitizer); the throwable is kept out of the log for the same reason.
+            val errorMsg = "Error generating tool arguments: ${CloudErrorSanitizer.sanitize(e)}"
+            Timber.tag("PipelineDebug").e("Tool argument generation failed (%s): %s", e::class.simpleName, errorMsg)
             emit(NodeOutput.State(AgentOrchestratorState.Error(errorMsg)))
             emit(NodeOutput.Result(NodeExecutionResult(error = errorMsg)))
             return@flow
@@ -220,8 +227,15 @@ class ToolNodeExecutor @Inject constructor(
                 throw ResolutionFailed()
             }
 
+            // The description and the parameter schema are the tool's own text (an
+            // MCP server's, for a server tool): their further lines are indented, so
+            // only a real tool can open a `Tool:` line.
             val toolsDescriptions = availableTools.joinToString("\n\n") {
-                "Tool: ${it.name}\nDescription: ${it.description}\nParameters: ${it.parameters}"
+                listOf(
+                    "Tool: ${it.name}",
+                    ChatTranscript.entry("Description: ", it.description),
+                    ChatTranscript.entry("Parameters: ", it.parameters),
+                ).joinToString("\n")
             }
 
             val prompt = DefaultPrompts.renderTemplate(

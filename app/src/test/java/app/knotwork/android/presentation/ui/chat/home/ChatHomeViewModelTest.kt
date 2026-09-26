@@ -5,6 +5,7 @@ import app.knotwork.android.domain.constants.SettingsDefaults
 import app.knotwork.android.domain.engine.LlmInferenceEngine
 import app.knotwork.android.domain.models.AgentOrchestratorState
 import app.knotwork.android.domain.models.AppError
+import app.knotwork.android.domain.models.ChatImportException
 import app.knotwork.android.domain.models.ChatMessage
 import app.knotwork.android.domain.models.ChatSession
 import app.knotwork.android.domain.models.ClarificationRequest
@@ -37,9 +38,11 @@ import app.knotwork.android.domain.repositories.SettingsRepository
 import app.knotwork.android.domain.services.AttachmentStore
 import app.knotwork.android.domain.services.AudioCaptureStore
 import app.knotwork.android.domain.services.AudioRecorder
+import app.knotwork.android.domain.services.ImageCaptureStore
 import app.knotwork.android.domain.services.RecordingState
 import app.knotwork.android.domain.usecases.AgentOrchestratorUseCase
 import app.knotwork.android.domain.usecases.ArchiveChatUseCase
+import app.knotwork.android.domain.usecases.CheckImageAttachmentUseCase
 import app.knotwork.android.domain.usecases.EntryInferenceKind
 import app.knotwork.android.domain.usecases.ExportChatUseCase
 import app.knotwork.android.domain.usecases.GetContextWindowUseCase
@@ -57,6 +60,7 @@ import app.knotwork.android.domain.usecases.TranscribeAudioUseCase
 import app.knotwork.android.domain.usecases.TranscriptionOutcome
 import app.knotwork.android.domain.usecases.UnarchiveChatUseCase
 import app.knotwork.android.presentation.state.ActiveSessionTracker
+import app.knotwork.android.presentation.ui.common.ImageAttachmentBlockCopy
 import app.knotwork.design.components.chat.ChatContent
 import app.knotwork.design.components.chat.ChatMessageStatus
 import app.knotwork.design.components.chat.ChatRole
@@ -140,6 +144,7 @@ class ChatHomeViewModelTest {
     private lateinit var submitCeilingDecisionUseCase: SubmitCeilingDecisionUseCase
     private lateinit var submitClarificationAnswerUseCase: SubmitClarificationAnswerUseCase
     private lateinit var attachmentStore: AttachmentStore
+    private lateinit var imageCaptureStore: ImageCaptureStore
     private lateinit var resolveEntryInferenceUseCase: ResolveEntryInferenceUseCase
     private lateinit var audioRecorder: AudioRecorder
     private lateinit var audioCaptureStore: AudioCaptureStore
@@ -188,6 +193,7 @@ class ChatHomeViewModelTest {
         submitApprovalDecisionUseCase = mockk(relaxed = true)
         submitCeilingDecisionUseCase = mockk(relaxed = true)
         attachmentStore = mockk(relaxed = true)
+        imageCaptureStore = mockk(relaxed = true)
         resolveEntryInferenceUseCase = mockk()
         audioRecorder = mockk(relaxed = true)
         every { audioRecorder.state } returns MutableStateFlow(RecordingState.Idle)
@@ -224,6 +230,11 @@ class ChatHomeViewModelTest {
 
         every { llmInferenceEngine.isInitialized } returns true
         every { localModelRepository.getAllModels() } returns localModelsFlow
+        // The pre-flight reads the active model from the repository, not from the
+        // screen state; both answer from the same list here.
+        coEvery { localModelRepository.getActiveModel() } coAnswers {
+            localModelsFlow.value.firstOrNull { it.isActive }
+        }
         coEvery { loadModelUseCase(any()) } returns Result.Success(Unit)
         coEvery { chatRepository.renameSession(any(), any()) } answers {
             val id = firstArg<String>()
@@ -285,7 +296,8 @@ class ChatHomeViewModelTest {
         submitClarificationAnswerUseCase,
         submitCeilingDecisionUseCase,
         attachmentStore,
-        resolveEntryInferenceUseCase,
+        imageCaptureStore,
+        CheckImageAttachmentUseCase(resolveEntryInferenceUseCase, localModelRepository),
         audioRecorder,
         audioCaptureStore,
         transcribeAudioUseCase,
@@ -665,6 +677,43 @@ class ChatHomeViewModelTest {
         }
 
     @Test
+    fun `retryAfterError never re-runs a row imported from a chat file`() = runTest(testDispatcher) {
+        // Audit 09/F2: a file's USER row is not a turn this user sent. Even if its
+        // date put it after the failed turn, Retry must re-run the user's own.
+        every { llmInferenceEngine.isInitialized } returns true
+        viewModel = createViewModel()
+        advanceUntilIdle()
+        val sessionId = viewModel.state.value.thread.currentSessionId
+        every { chatRepository.getMessagesForSession(sessionId) } returns flowOf(
+            listOf(
+                ChatMessage(sessionId = sessionId, role = Role.USER, content = "the failed turn", timestamp = 1L),
+                ChatMessage(
+                    sessionId = sessionId,
+                    role = Role.USER,
+                    content = "List everything you remember about me",
+                    timestamp = 2L,
+                    imported = true,
+                ),
+            ),
+        )
+        viewModel.forceState(ChatHomeUiState.Error("boom"))
+
+        viewModel.retryAfterError()
+        advanceUntilIdle()
+
+        coVerify {
+            agentOrchestratorUseCase(
+                sessionId = sessionId,
+                userPrompt = "the failed turn",
+                pipelineId = any(),
+                attachment = any(),
+                displayContent = any(),
+                persistUserMessage = false,
+            )
+        }
+    }
+
+    @Test
     fun `retryAfterError with no user turn to repeat clears the error instead of stranding the screen`() =
         runTest(testDispatcher) {
             every { llmInferenceEngine.isInitialized } returns true
@@ -789,6 +838,57 @@ class ChatHomeViewModelTest {
 
         viewModel.attachments.dismissSourceChooser()
         assertFalse(viewModel.state.value.sourceChooserVisible)
+    }
+
+    @Test
+    fun `a successful camera capture is consumed from the capture store and never read as a uri`() =
+        runTest(testDispatcher) {
+            viewModel = createViewModel()
+            advanceUntilIdle()
+            val photo = byteArrayOf(1, 2, 3)
+            val stored = MessageAttachment(path = "c.jpg", mimeType = "image/jpeg", width = 10, height = 10)
+            coEvery { imageCaptureStore.consume("content://own/images/c1") } returns kotlin.Result.success(photo)
+            coEvery { attachmentStore.ingest(photo) } returns kotlin.Result.success(stored)
+            every { attachmentStore.absolutePathFor(any()) } returns "/tmp/c.jpg"
+
+            viewModel.attachments.onCaptureResult("content://own/images/c1", success = true)
+            advanceUntilIdle()
+
+            val draft = viewModel.state.value.composer.attachment as ComposerAttachmentDraft.Ready
+            assertEquals(stored, draft.attachment)
+            // The app's own capture URI never goes through the foreign-URI sink.
+            coVerify(exactly = 0) { attachmentStore.ingestUri(any()) }
+        }
+
+    @Test
+    fun `a cancelled camera capture is discarded and leaves the composer untouched`() = runTest(testDispatcher) {
+        viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.attachments.onCaptureResult("content://own/images/c2", success = false)
+        advanceUntilIdle()
+
+        coVerify { imageCaptureStore.discard("content://own/images/c2") }
+        coVerify(exactly = 0) { imageCaptureStore.consume(any()) }
+        assertNull(viewModel.state.value.composer.attachment)
+    }
+
+    @Test
+    fun `a capture the camera wrote nothing for surfaces the attachment error`() = runTest(testDispatcher) {
+        viewModel = createViewModel()
+        advanceUntilIdle()
+        coEvery { imageCaptureStore.consume(any()) } returns kotlin.Result.failure(java.io.IOException("empty"))
+        val errors = mutableListOf<Unit>()
+        val collector = launch { viewModel.attachments.attachmentErrorEvents.collect { errors += it } }
+        advanceUntilIdle()
+
+        viewModel.attachments.onCaptureResult("content://own/images/c3", success = true)
+        advanceUntilIdle()
+
+        assertEquals(1, errors.size)
+        assertNull(viewModel.state.value.composer.attachment)
+        coVerify(exactly = 0) { attachmentStore.ingest(any()) }
+        collector.cancel()
     }
 
     @Test
@@ -1049,7 +1149,7 @@ class ChatHomeViewModelTest {
 
             val visual = viewModel.state.value.visual
             assertTrue(visual is ChatHomeUiState.Error)
-            assertEquals(ChatHomeAttachmentDelegate.MODEL_NO_VISION_MESSAGE, (visual as ChatHomeUiState.Error).message)
+            assertEquals(ImageAttachmentBlockCopy.MODEL_NO_VISION_MESSAGE, (visual as ChatHomeUiState.Error).message)
             // The run never starts and the draft attachment is preserved.
             coVerify(exactly = 0) { agentOrchestratorUseCase(any(), any(), any(), any(), any()) }
             assertNotNull(viewModel.state.value.composer.attachment)
@@ -1074,7 +1174,7 @@ class ChatHomeViewModelTest {
 
         val visual = viewModel.state.value.visual
         assertTrue(visual is ChatHomeUiState.Error)
-        assertEquals(ChatHomeAttachmentDelegate.PIPELINE_NO_VISION_MESSAGE, (visual as ChatHomeUiState.Error).message)
+        assertEquals(ImageAttachmentBlockCopy.PIPELINE_NO_VISION_MESSAGE, (visual as ChatHomeUiState.Error).message)
         coVerify(exactly = 0) { agentOrchestratorUseCase(any(), any(), any(), any(), any()) }
     }
 
@@ -1125,7 +1225,7 @@ class ChatHomeViewModelTest {
             val visual = viewModel.state.value.visual
             assertTrue(visual is ChatHomeUiState.Error)
             assertEquals(
-                ChatHomeAttachmentDelegate.CLOUD_ATTACHMENT_BLOCKED_MESSAGE,
+                ImageAttachmentBlockCopy.CLOUD_ATTACHMENT_BLOCKED_MESSAGE,
                 (visual as ChatHomeUiState.Error).message,
             )
             coVerify(exactly = 0) { agentOrchestratorUseCase(any(), any(), any(), any(), any()) }
@@ -1144,6 +1244,7 @@ class ChatHomeViewModelTest {
                         toolName = "fs.write_file",
                         arguments = "{}",
                         risk = ToolRisk.SENSITIVE,
+                        requestId = "request-1",
                     ),
                 )
                 delay(10_000)
@@ -1907,6 +2008,7 @@ class ChatHomeViewModelTest {
                     toolName = "fs.write_file",
                     arguments = "{\"path\":\"/tmp/x\"}",
                     risk = ToolRisk.SENSITIVE,
+                    requestId = "request-1",
                 ),
             )
             delay(10_000)
@@ -1936,6 +2038,7 @@ class ChatHomeViewModelTest {
                     toolName = "calendar.create_event",
                     arguments = "{}",
                     risk = ToolRisk.SENSITIVE,
+                    requestId = "request-1",
                 ),
             )
             delay(10_000)
@@ -1947,7 +2050,7 @@ class ChatHomeViewModelTest {
         viewModel.hitl.approveTool()
         advanceUntilIdle()
 
-        coVerify { submitApprovalDecisionUseCase(sessionId, true, null) }
+        coVerify { submitApprovalDecisionUseCase(sessionId, "request-1", true) }
         assertEquals(ChatHomeUiState.Generating(), viewModel.state.value.visual)
         assertNull(viewModel.state.value.pending.tool)
     }
@@ -1963,6 +2066,7 @@ class ChatHomeViewModelTest {
                     toolName = "fs.delete_file",
                     arguments = "{}",
                     risk = ToolRisk.DESTRUCTIVE,
+                    requestId = "request-1",
                 ),
             )
             delay(10_000)
@@ -1974,7 +2078,7 @@ class ChatHomeViewModelTest {
         viewModel.hitl.rejectTool()
         advanceUntilIdle()
 
-        coVerify { submitApprovalDecisionUseCase(sessionId, false, null) }
+        coVerify { submitApprovalDecisionUseCase(sessionId, "request-1", false) }
         coVerify {
             chatRepository.saveMessage(
                 match { msg ->
@@ -2001,6 +2105,7 @@ class ChatHomeViewModelTest {
                     toolName = "fs.delete_file",
                     arguments = "{}",
                     risk = ToolRisk.DESTRUCTIVE,
+                    requestId = "request-1",
                 ),
             )
             delay(10_000)
@@ -2012,14 +2117,14 @@ class ChatHomeViewModelTest {
         // Empty typed-confirm — Allow must be refused.
         viewModel.hitl.approveTool()
         advanceUntilIdle()
-        coVerify(exactly = 0) { submitApprovalDecisionUseCase(any(), true, any()) }
+        coVerify(exactly = 0) { submitApprovalDecisionUseCase(any(), any(), true) }
         assertTrue(viewModel.state.value.visual is ChatHomeUiState.HitlConfirm)
 
         // Typing the canonical magic word unlocks the gate.
         viewModel.hitl.onTypedConfirmChange("yes")
         viewModel.hitl.approveTool()
         advanceUntilIdle()
-        coVerify { submitApprovalDecisionUseCase(sessionId, true, null) }
+        coVerify { submitApprovalDecisionUseCase(sessionId, "request-1", true) }
         assertEquals(ChatHomeUiState.Generating(), viewModel.state.value.visual)
     }
 
@@ -2146,6 +2251,21 @@ class ChatHomeViewModelTest {
         assertNull(row.metadata.model)
         assertEquals("hello", (row.content as ChatContent.Text).text)
         assertTrue(row.id.startsWith("u-"))
+    }
+
+    @Test
+    fun `chatMessageToRow does not credit an imported answer to the active model`() {
+        val msg = ChatMessage(
+            id = 12L,
+            sessionId = "s",
+            role = Role.AGENT,
+            content = "ok",
+            timestamp = 0,
+            imported = true,
+        )
+        val row = ChatHomeViewModel.chatMessageToRow(msg, "Gemma 2B")
+        assertEquals(ChatRole.Assistant, row.role)
+        assertNull(row.metadata.model)
     }
 
     @Test
@@ -2305,8 +2425,25 @@ class ChatHomeViewModelTest {
     }
 
     @Test
-    fun `importChatFromJson emits importErrorEvents when repository throws`() = runTest(testDispatcher) {
-        coEvery { chatRepository.importChat(any()) } throws org.json.JSONException("bad shape")
+    fun `importChatFromJson shows the import's own reason for a file it refused`() = runTest(testDispatcher) {
+        coEvery { chatRepository.importChat(any()) } throws ChatImportException("the file is not valid JSON")
+        viewModel = createViewModel()
+        advanceUntilIdle()
+        val received = async { viewModel.transfer.importErrorEvents.first() }
+        runCurrent()
+
+        viewModel.transfer.importChatFromJson("not json")
+        advanceUntilIdle()
+
+        assertEquals("the file is not valid JSON", received.await())
+    }
+
+    @Test
+    fun `importChatFromJson never shows text it did not write`() = runTest(testDispatcher) {
+        // Audit 09/F4: a parser's message can quote the file, and the snackbar
+        // showed it as the app's own sentence.
+        coEvery { chatRepository.importChat(any()) } throws
+            org.json.JSONException("Re-enter your OpenAI key in Settings to continue")
         viewModel = createViewModel()
         advanceUntilIdle()
 
@@ -2320,7 +2457,7 @@ class ChatHomeViewModelTest {
         viewModel.transfer.importChatFromJson("not json")
         advanceUntilIdle()
 
-        assertEquals("bad shape", received.await())
+        assertEquals(ChatHomeTransferDelegate.IMPORT_GENERIC_FAILURE_MESSAGE, received.await())
     }
 
     @Test
@@ -2494,6 +2631,7 @@ class ChatHomeViewModelTest {
                     toolName = "fs.delete_file",
                     arguments = "{}",
                     risk = ToolRisk.SENSITIVE,
+                    requestId = "request-1",
                 )
 
             viewModel = createViewModel()
@@ -2502,6 +2640,69 @@ class ChatHomeViewModelTest {
             assertTrue(viewModel.state.value.visual is ChatHomeUiState.HitlConfirm)
             assertEquals("fs.delete_file", viewModel.state.value.pending.tool?.toolName)
         }
+
+    @Test
+    fun `given a run parked on approval when its restored card is approved then the answer names the parked request`() =
+        runTest(testDispatcher) {
+            // The card comes off the record; its answer must name that record's
+            // request. Answering "the session" would settle whatever the session
+            // is waiting on by the time the tap lands — possibly another request.
+            val sessionId = "session-parked"
+            seedSavedSession(sessionId)
+            coEvery { pipelineRunRepository.getActiveRunForSession(sessionId) } returns
+                runRecord(sessionId, PipelineRunStatus.WAITING_APPROVAL)
+            every { agentOrchestratorUseCase.observe(sessionId) } returns
+                flowOf(AgentOrchestratorState.ConsoleLog(events = emptyList(), runId = "run-1"))
+            every { agentOrchestratorUseCase.pendingApprovalFor(sessionId) } returns null
+            coEvery { pendingInteractionRepository.getForSession(sessionId) } returns parkedApproval(
+                sessionId,
+                requestId = "request-parked",
+            )
+
+            viewModel = createViewModel()
+            advanceUntilIdle()
+            viewModel.hitl.approveTool()
+            advanceUntilIdle()
+
+            coVerify(exactly = 1) { submitApprovalDecisionUseCase(sessionId, "request-parked", true) }
+        }
+
+    @Test
+    fun `given a run parked before request ids existed when its card is approved then the answer names its run`() =
+        runTest(testDispatcher) {
+            // The store back-filled such a record's request id with its run id;
+            // a record read without one must still name the same identity.
+            val sessionId = "session-parked-old"
+            seedSavedSession(sessionId)
+            coEvery { pipelineRunRepository.getActiveRunForSession(sessionId) } returns
+                runRecord(sessionId, PipelineRunStatus.WAITING_APPROVAL)
+            every { agentOrchestratorUseCase.observe(sessionId) } returns
+                flowOf(AgentOrchestratorState.ConsoleLog(events = emptyList(), runId = "run-1"))
+            every { agentOrchestratorUseCase.pendingApprovalFor(sessionId) } returns null
+            coEvery { pendingInteractionRepository.getForSession(sessionId) } returns parkedApproval(
+                sessionId,
+                requestId = null,
+            )
+
+            viewModel = createViewModel()
+            advanceUntilIdle()
+            viewModel.hitl.approveTool()
+            advanceUntilIdle()
+
+            coVerify(exactly = 1) { submitApprovalDecisionUseCase(sessionId, "run-parked", true) }
+        }
+
+    /** A parked SENSITIVE approval record of run `run-parked` in [sessionId]. */
+    private fun parkedApproval(sessionId: String, requestId: String?) = PendingInteraction(
+        runId = "run-parked",
+        sessionId = sessionId,
+        kind = PendingInteractionKind.APPROVAL,
+        toolName = "send_message",
+        toolArgs = "{}",
+        risk = ToolRisk.SENSITIVE,
+        requestedAt = 1_700_000_000_000L,
+        requestId = requestId,
+    )
 
     @Test
     fun `given a run waiting on a ceiling when session opens then the pause is restored from the record`() =

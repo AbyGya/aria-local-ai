@@ -21,11 +21,12 @@ import javax.inject.Singleton
  * agent runs continuously in the background. The tell is the *rate* of scheduled
  * runs, not the depth of the queue, so scheduling is refused once
  * [MAX_SCHEDULED_RUNS_PER_HOUR] scheduled runs have already started within the
- * last hour. A legitimate cadence (hourly or slower, which is also all the
- * background runtime honours for repeating work) never approaches the limit;
- * a self-re-scheduling loop crosses it within minutes. The refusal is returned
- * to the model as the tool's result, worded so that retrying is visibly not the
- * answer.
+ * last hour — top-level runs only: a pipeline step that runs another pipeline is
+ * part of the scheduled run, not a second one. A legitimate cadence (hourly or
+ * slower, which is also all the background runtime honours for repeating work)
+ * never approaches the limit; a self-re-scheduling loop crosses it within
+ * minutes. The refusal is returned to the model as the tool's result, worded so
+ * that retrying is visibly not the answer.
  */
 @Singleton
 class ScheduleTaskUseCase @Inject constructor(
@@ -54,12 +55,12 @@ class ScheduleTaskUseCase @Inject constructor(
         sessionId: String? = null,
         nowMillis: Long = System.currentTimeMillis(),
     ): String = try {
-        val recentRuns = pipelineRunRepository.countRunsByOriginSince(
+        val recentRuns = pipelineRunRepository.countRootRunsByOriginSince(
             origin = CEILING.origin,
             sinceEpochMs = CEILING.windowStart(nowMillis),
         )
         if (CEILING.isExceededBy(recentRuns)) {
-            Timber.w("Refusing to schedule: $recentRuns scheduled runs in the last hour")
+            Timber.w("Refusing to schedule: %d scheduled runs in the last hour", recentRuns)
             REFUSAL_MESSAGE
         } else {
             schedule(prompt, intervalHours, delayMinutes, sessionId)
@@ -78,7 +79,7 @@ class ScheduleTaskUseCase @Inject constructor(
      *
      * @return The user-facing confirmation for the tool result.
      */
-    private fun schedule(prompt: String, intervalHours: Long, delayMinutes: Long, sessionId: String?): String {
+    private suspend fun schedule(prompt: String, intervalHours: Long, delayMinutes: Long, sessionId: String?): String {
         val constraints = ScheduledTaskConstraints(requiresBatteryNotLow = true)
 
         return if (intervalHours > 0) {

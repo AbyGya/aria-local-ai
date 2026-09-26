@@ -3,17 +3,15 @@ package app.knotwork.android.presentation.ui.orchestrator
 import android.content.ContentResolver
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.text.format.Formatter
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -25,7 +23,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -35,9 +32,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.knotwork.android.R
+import app.knotwork.android.domain.constants.PipelineConstants
 import app.knotwork.android.domain.models.EntrySurface
 import app.knotwork.android.domain.models.ImportCollisionResolution
 import app.knotwork.android.domain.models.PipelineGraph
+import app.knotwork.android.presentation.common.BoundedText
+import app.knotwork.android.presentation.common.readTextWithin
 import app.knotwork.android.presentation.ui.common.asString
 import app.knotwork.android.presentation.ui.orchestrator.presets.GraphFlowPreview
 import app.knotwork.android.presentation.ui.orchestrator.presets.PipelineLibrarySpeedDial
@@ -52,6 +52,7 @@ import app.knotwork.design.components.dialogs.OutcomeNamedList
 import app.knotwork.design.components.dialogs.OutcomeTone
 import app.knotwork.design.components.dialogs.SingleFieldDialog
 import app.knotwork.design.components.dialogs.SingleFieldDialogUi
+import app.knotwork.design.components.misc.KnotworkSnackbarHost
 import app.knotwork.design.icons.AppIcons
 import app.knotwork.design.screens.pipelines.PipelineLibraryCallbacks
 import app.knotwork.design.screens.pipelines.PipelineLibraryContent
@@ -100,27 +101,36 @@ fun PipelineLibraryScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val importUnreadableMessage = stringResource(R.string.orchestrator_library_import_unreadable)
+    val importTooLargeMessage = stringResource(
+        R.string.orchestrator_library_import_too_large,
+        Formatter.formatShortFileSize(context, PipelineConstants.MAX_IMPORT_FILE_BYTES),
+    )
 
     // SAF launcher for the footer "Import JSON" affordance. Reads the picked
     // document off the main thread and hands the text to the VM, which parses,
     // validates, persists, and (on a schemaVersion mismatch) stashes the graph
-    // in `pendingImport` for the confirmation dialog below.
+    // in `pendingImport` for the confirmation dialog below. The read stops at
+    // the import ceiling: the file's size is its author's choice, and an
+    // unbounded read ended in an out-of-memory crash in the parser.
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
-            val json = withContext(Dispatchers.IO) {
+            val read = withContext(Dispatchers.IO) {
                 runCatching {
-                    context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                    context.contentResolver.openInputStream(uri)?.use {
+                        it.readTextWithin(PipelineConstants.MAX_IMPORT_FILE_BYTES)
+                    }
                 }.getOrNull()
             }
-            if (json.isNullOrBlank()) {
-                snackbarHostState.showSnackbar(message = importUnreadableMessage)
-            } else {
+            when {
+                read is BoundedText.TooLarge -> snackbarHostState.showSnackbar(message = importTooLargeMessage)
+                read !is BoundedText.Read || read.text.isBlank() ->
+                    snackbarHostState.showSnackbar(message = importUnreadableMessage)
                 // Detects a bundle envelope vs a single-pipeline document and
                 // routes to the matching flow — one affordance, two shapes.
-                viewModel.importJson(json)
+                else -> viewModel.importJson(read.text)
             }
         }
     }
@@ -298,20 +308,22 @@ fun PipelineLibraryScreen(
     )
 
     Box(modifier = Modifier.fillMaxSize().testTag(tag = LIBRARY_ROOT_TEST_TAG)) {
-        PipelineLibraryContent(state = viewState, callbacks = callbacks)
-        if (!viewState.isFabHidden) {
-            PipelineLibrarySpeedDial(
-                onNewPipeline = callbacks.onNewPipeline,
-                onFromPreset = { showPresetPicker = true },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(
-                        end = KnotworkTheme.spacing.sp4,
-                        bottom = KnotworkTheme.spacing.sp4,
-                    ),
-            )
-        }
-        SnackbarHost(hostState = snackbarHostState)
+        // Speed dial and snackbar both in the content's Scaffold: it places the
+        // dial at the bottom end and lifts a snackbar above it. The snackbar used
+        // to sit unaligned in this Box — at the top-left, over the top bar.
+        PipelineLibraryContent(
+            state = viewState,
+            callbacks = callbacks,
+            snackbarHost = { KnotworkSnackbarHost(hostState = snackbarHostState) },
+            floatingActionButton = {
+                if (!viewState.isFabHidden) {
+                    PipelineLibrarySpeedDial(
+                        onNewPipeline = callbacks.onNewPipeline,
+                        onFromPreset = { showPresetPicker = true },
+                    )
+                }
+            },
+        )
     }
 
     if (showPresetPicker) {
@@ -501,81 +513,40 @@ fun PipelineLibraryScreen(
             onDismissRequest = viewModel::cancelPendingImport,
         )
     }
-    uiState.pendingCollision?.let { graph ->
-        AlertDialog(
-            onDismissRequest = viewModel::cancelCollision,
-            title = { Text(stringResource(R.string.orchestrator_library_import_collision_title)) },
-            text = {
-                Text(
-                    stringResource(
-                        R.string.orchestrator_library_import_collision_single_body,
-                        graph.name.ifBlank { "untitled" },
-                    ),
-                )
-            },
-            confirmButton = {
-                Row(horizontalArrangement = Arrangement.spacedBy(KnotworkTheme.spacing.sp1)) {
-                    TextButton(onClick = { viewModel.resolveCollision(ImportCollisionResolution.REPLACE) }) {
-                        Text(stringResource(R.string.orchestrator_library_import_collision_replace))
-                    }
-                    TextButton(onClick = { viewModel.resolveCollision(ImportCollisionResolution.IMPORT_AS_COPY) }) {
-                        Text(stringResource(R.string.orchestrator_library_import_collision_copy))
-                    }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = viewModel::cancelCollision) {
-                    Text(stringResource(R.string.common_cancel))
-                }
-            },
+    uiState.pendingCollision?.let { collision ->
+        PipelineCollisionDialog(
+            collision = collision,
+            onReplace = { viewModel.resolveCollision(ImportCollisionResolution.REPLACE) },
+            onImportAsCopy = { viewModel.resolveCollision(ImportCollisionResolution.IMPORT_AS_COPY) },
+            onDismiss = viewModel::cancelCollision,
         )
     }
     uiState.pendingBundleImport?.let { pending ->
-        val hasCollision = pending.collidingIds.isNotEmpty()
-        AlertDialog(
-            onDismissRequest = viewModel::cancelBundleImport,
-            title = { Text(stringResource(R.string.orchestrator_library_import_bundle_title)) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(KnotworkTheme.spacing.sp2)) {
-                    if (hasCollision) {
-                        Text(
-                            pluralStringResource(
-                                R.plurals.orchestrator_library_import_bundle_collision_body,
-                                pending.collidingIds.size,
-                                pending.collidingIds.size,
-                                pending.pipelines.size,
-                            ),
-                        )
-                    }
-                    if (pending.schemaMismatches.isNotEmpty()) {
-                        Text(stringResource(R.string.orchestrator_library_import_bundle_schema_body))
-                    }
-                }
-            },
-            confirmButton = {
-                if (hasCollision) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(KnotworkTheme.spacing.sp1)) {
-                        TextButton(onClick = { viewModel.resolveBundleImport(ImportCollisionResolution.REPLACE) }) {
-                            Text(stringResource(R.string.orchestrator_library_import_bundle_replace))
-                        }
-                        TextButton(
-                            onClick = { viewModel.resolveBundleImport(ImportCollisionResolution.IMPORT_AS_COPY) },
-                        ) {
-                            Text(stringResource(R.string.orchestrator_library_import_bundle_copies))
-                        }
-                    }
-                } else {
+        if (pending.collisions.isNotEmpty()) {
+            BundleCollisionDialog(
+                pending = pending,
+                onReplace = { viewModel.resolveBundleImport(ImportCollisionResolution.REPLACE) },
+                onImportAsCopies = { viewModel.resolveBundleImport(ImportCollisionResolution.IMPORT_AS_COPY) },
+                onDismiss = viewModel::cancelBundleImport,
+            )
+        } else {
+            // Nothing collides; only a schema-version note needs the user's nod.
+            AlertDialog(
+                onDismissRequest = viewModel::cancelBundleImport,
+                title = { Text(stringResource(R.string.orchestrator_library_import_bundle_title)) },
+                text = { Text(stringResource(R.string.orchestrator_library_import_bundle_schema_body)) },
+                confirmButton = {
                     TextButton(onClick = { viewModel.resolveBundleImport(ImportCollisionResolution.REPLACE) }) {
                         Text(stringResource(R.string.orchestrator_library_import_anyway))
                     }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = viewModel::cancelBundleImport) {
-                    Text(stringResource(R.string.common_cancel))
-                }
-            },
-        )
+                },
+                dismissButton = {
+                    TextButton(onClick = viewModel::cancelBundleImport) {
+                        Text(stringResource(R.string.common_cancel))
+                    }
+                },
+            )
+        }
     }
 }
 

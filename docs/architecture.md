@@ -249,7 +249,9 @@ Step-by-step notes:
    30-second per-session debounce — and only when
    `SettingsRepository.autoExtractEnabled` is set — it runs
    `MemoryExtractionUseCase`, which makes one local-model pass to distil
-   durable facts from the recent dialogue, embeds them with the active
+   durable facts from the recent dialogue — the user's and the assistant's
+   turns only; tool observations and other `SYSTEM` rows are never read —
+   embeds them with the active
    `EmbeddingProvider`, drops near-duplicates, and writes survivors to
    `memory_chunks` tagged with `MemorySource.ChatSession`. This is
    fire-and-forget background work and never blocks or fails the chat.
@@ -269,9 +271,13 @@ Import (`MemoryImportUseCase`) parses the file (`Success` /
 `SchemaMismatch` / `Failure`) and reconciles it under a user-chosen
 strategy: **Merge** (insert only ids not already present) or **Replace**
 (an atomic wipe-and-load, a no-op when the document carries no chunks),
-preserving each chunk's id, provenance, pin state and tags. The parser
+preserving each chunk's id, provenance and tags. The parser
 rejects chunks with a malformed embedding (empty array / non-finite
-value) so a corrupt vector never reaches the store.
+value) so a corrupt vector never reaches the store. Two fields that decide
+whether a chunk is retrieved at all are not taken from a file: every chunk is
+imported unpinned (the count of pins the file carried,
+`MemoryExportDocument.pinnedInFile`, becomes a notice in the import dialog),
+and a `timestamp` later than the parse is capped to it.
 
 When the document's embedding provider differs from the importing
 device's active **resolved** provider — `EmbeddingProviderResolver.resolve()`,
@@ -429,7 +435,8 @@ which subset is enabled:
 1. `--- Original Task ---` — the user message that started the current
    run.
 2. `--- Chat History ---` — numbered conversation history with
-   `USER`/`AGENT` roles.
+   `USER`/`AGENT`/`SYSTEM` roles (`SYSTEM` rows carry the tool observations
+   recorded earlier in the chat).
 3. `--- Long-Term Memory ---` — semantic-retrieval hits over past
    memory chunks. A vector search ranks chunks by cosine similarity;
    `MemoryReranker` then filters the pool by that similarity and re-scores
@@ -458,6 +465,15 @@ reasons:
 An enabled block with no data does not produce an empty header — the
 block is simply skipped. If no enabled block has content, the builder
 returns an empty string.
+
+The three list blocks (chat history, memory, tool results) render each
+entry through `ChatTranscript` (`domain/prompt/`): an entry's first line
+carries its number and label, and every further line of its content is
+indented. A line starting in the first column is therefore always a real
+entry — stored content, a tool result above all, cannot open a turn, an
+entry or a `--- Block ---` header of its own. The extraction and history
+compression transcripts use the same rule. *Original Task* and
+*Previous Node Output* are single payloads and are passed as written.
 
 ### 3.3. `NodeContextConfig` flags
 
@@ -647,15 +663,19 @@ into a run is deliberately narrow so the rest of the engine stays text-only:
 
 **Capability and privacy guards.** The LiteRT runtime exposes no vision-capability
 probe, so `LocalModel.supportsVision` is a manual per-model flag (Models screen
-toggle, default `false`). Before enqueueing an image message, `ChatHomeViewModel`
-runs a pre-flight on `ResolveEntryInferenceUseCase`, which classifies the bound
+toggle, default `false`). Before an image run is enqueued — from the composer
+(`ChatHomeViewModel`) or the share target (`LaunchSharePipelineUseCase`) —
+`CheckImageAttachmentUseCase` runs the pre-flight on `ResolveEntryInferenceUseCase`,
+which classifies the bound
 pipeline the same way the engine delivers: `CLOUD` when the run starts on a cloud
 node, `LOCAL` when a **vision sink** (a `LITE_RT` node carrying the original task)
 is reachable from `INPUT` — **recursing into `PIPELINE` nodes' sub-graphs**, since
 the engine forwards the image there — else `NONE`. The three guards, in order, are: `CLOUD`
 → blocked (attachments never leave the device); active model not vision-capable →
-blocked; `NONE` (no reachable vision sink) → blocked. Each preserves the draft and
-shows a clear message. Branch-dependent routing can still take a path that skips
+blocked; `NONE` (no reachable vision sink) → blocked. The composer keeps the draft
+and shows the reason; a blocked share stores nothing and says why. Every file that
+starts runs is in `ImageAttachmentEntryCensusTest`, so a new image entry cannot skip
+the pre-flight unnoticed. Branch-dependent routing can still take a path that skips
 the sink even when one exists; the engine emits an *"Image not used"* console note
 in that case rather than letting the earlier `Image input` line imply otherwise.
 `CloudLlmNodeExecutor` structurally ignores `ExecutionScope.imagePath`, so an
@@ -812,7 +832,7 @@ The agent talks to AppFunctions in two directions:
 
 - **Caller-side** — the agent invokes AppFunctions exposed by *other*
   apps. `LocalAppFunctionManager` discovers them through
-  `AppFunctionManager.observeAppFunctions(...)` and `ToolRepositoryImpl`
+  `AppFunctionManager.searchAppFunctions(...)` and `ToolRepositoryImpl`
   merges the result into the visible tool catalogue (alongside built-ins
   and MCP tools). AppFunctions are keyed by their qualified name
   (`"${packageName}/${id}"`) so identical ids exposed by different
@@ -833,20 +853,20 @@ The agent talks to AppFunctions in two directions:
   device allowlist and explicit user approval — so this is a door
   designed to open; it is not what ships today.
 - **Callee-side** — the agent exposes a curated set of read-only
-  built-ins to *other* apps. Wrappers live in
-  `data/tools/local/appfunctions/` and are annotated with
-  `androidx.appfunctions.service.AppFunction`. The auto-merged
-  `androidx.appfunctions.service.PlatformAppFunctionService` (from
-  `appfunctions-service`) advertises them through
-  `app_functions_v2.xml` (generated by KSP with the
-  `appfunctions:aggregateAppFunctions=true` arg in `app/build.gradle.kts`)
-  and dispatches incoming requests through KSP-generated invokers.
-  `App` implements
-  `androidx.appfunctions.service.AppFunctionConfiguration.Provider` to
-  supply Hilt-managed instances of those wrappers, so the callee path
-  shares caches and rate limits with the caller path. The first wrapper
-  is `SearchAppFunction`, a thin shell over the built-in `search_tool`
-  (READ_ONLY). Because it calls `SearchTool` directly, the checks
+  built-ins to *other* apps, on Android 16 and later. Every published
+  function is declared on one entry point,
+  `data/tools/local/appfunctions/AgentAppFunctionService`: an abstract
+  `androidx.appfunctions.AppFunctionService` annotated
+  `@AppFunctionServiceEntryPoint` and `@AndroidEntryPoint`. The
+  AppFunctions compiler generates the concrete `KnotworkAppFunctionService`
+  with its dispatch and writes the inventory to the generated
+  `knotwork_app_functions.xml` asset; the manifest registers that service,
+  guarded by `BIND_APP_FUNCTION_SERVICE`, and names the inventory
+  (`AppFunctionServiceManifestGuardTest` keeps the three in step). Each
+  `@AppFunction` delegates to a Hilt-injected class, so the callee path
+  shares caches and rate limits with the caller path. The one published
+  function is `search`, whose body is `SearchAppFunction`, a thin shell over
+  the built-in `search_tool` (READ_ONLY). Because it calls `SearchTool` directly, the checks
   `ToolRepositoryImpl` makes — the per-tool switch among them — do not
   run on this path; the *Block network from local model* refusal does,
   because it lives in `SearchTool` itself. Anything a callee must not be
@@ -856,11 +876,11 @@ The agent talks to AppFunctions in two directions:
   cloud API quota on behalf of a third-party caller would violate the
   user's expectation of agency.
 
-Caveat: when a wrapper's package path contains a Kotlin soft keyword
+Caveat: when the entry point's package path contains a Kotlin soft keyword
 (`data`, `value`, …), the AppFunctions compiler bakes Kotlin
-source-level escaping into the generated wire id. `SearchAppFunction`'s
-id therefore embeds literal backticks around `data`:
-`` app.knotwork.android.`data`.tools.local.appfunctions.SearchAppFunction#invoke ``
+source-level escaping into the generated wire id. The `search` id
+therefore embeds literal backticks around `data`:
+`` app.knotwork.android.`data`.tools.local.appfunctions.AgentAppFunctionService#search ``
 External callers must pass the backticks verbatim. The
 end-to-end test (`AppFunctionsEndToEndTest.SEARCH_TOOL_ID`) and the
 `:tools-probe` `MainActivity` constant are the source-of-truth literals.
@@ -892,24 +912,31 @@ merges three layers:
    the same map — keyed per server by the tool's
    `mcp:<sha8(serverUrl)>:<toolName>` id rather than its bare name, so
    two servers advertising the same `create_issue` stay independent
-   decisions. The override is the **user's** voice, never the server's:
+   decisions. The key is the one of the server that **serves** the name
+   (§4.3), the same server the call is sent to. The override is the
+   **user's** voice, never the server's:
    MCP's `readOnlyHint` / `destructiveHint` annotations are deliberately
    not consulted, because a remote server that could declare its own
    tools read-only could walk straight past this gate.
 
 HITL contract (live):
 
-- Before dispatching a tool, `ToolNodeExecutor` resolves the tool's risk
-  through `ToolRepository.getRisk(name)` and applies the gate:
-  - `SENSITIVE` and `DESTRUCTIVE` — always emit
-    `AgentOrchestratorState.WaitingForApproval(toolName, args, risk)` and
-    suspend on the per-session approval `CompletableDeferred` until the
-    user resolves it via the chat console row, the system notification
-    action, or the configured timeout.
-  - `READ_ONLY` — run without a prompt **unless** the user has globally
-    enabled `SettingsRepository.requiresUserConfirmation`. That flag is
-    now an opt-in "ask on every single tool call" override and never
-    silences `SENSITIVE` / `DESTRUCTIVE`.
+- Before dispatching a tool, `ToolInvocationGate` (shared by the `TOOL` and
+  `SKILL` executors) resolves the tool's risk through
+  `ToolRepository.getRisk(name)` and asks
+  `ToolApprovalPolicy.requiresApproval(risk)` whether the call must wait —
+  ORed with the node's own `alwaysConfirm` switch, which can only add a
+  prompt:
+  - `DESTRUCTIVE` — asks under every policy (`All`, `Sensitive +`, `Never`).
+    The only control that removes the prompt is *Block destructive tools*,
+    which refuses the call before the gate instead of running it.
+  - `SENSITIVE` — asks unless the policy is `Never`.
+  - `READ_ONLY` — asks only under `All`.
+  - A call that must wait emits
+    `AgentOrchestratorState.WaitingForApproval(toolName, args, risk, requestId)`
+    and suspends on a `CompletableDeferred` registered for that one request
+    until the user resolves it via the chat console row, the system
+    notification action, or the configured timeout.
 - `WaitingForApproval` carries the resolved `risk` so the chat console
   can render a coloured risk chip (`READ` / `SENS` / `DEST`) next to the
   tool name without re-resolving.
@@ -945,6 +972,31 @@ raw exceptions never reach the presentation layer. `runCatching` is
 never used around these suspending calls (it would swallow
 cancellation; see [`docs/api-conventions.md`](api-conventions.md) §
 Model Context Protocol).
+
+**One server per name.** Which server answers a tool name is decided by one
+rule, [`McpToolRouting`](../app/src/main/java/app/knotwork/android/domain/services/McpToolRouting.kt),
+read by the agent's catalogue (`getAvailableTools`), the risk lookup
+(`getRisk`), the dispatch (`executeTool`) and the Tools screen alike: a tool on
+the device — built-in or discovered AppFunction — always owns its name, and
+otherwise the first server in the user's order that publishes the name with it
+switched on serves it. Any other server's entry is left out of the catalogue,
+so the description the model chose from, the decision that gated the call and
+the server that runs it are always the same one. There is no failover: a call
+that fails on the serving server is not retried elsewhere, because the retry
+would run under a decision made for another server and could repeat a side
+effect of a call that timed out but is still running. The rule is applied twice
+per call — once for the risk, once for the dispatch — and the pool may reconnect
+a server in between, so the gate passes the risk it decided on
+(`ToolExecutionContext.gatedRisk`) and the dispatch refuses the call when the
+serving server's risk no longer matches.
+
+**Bounded input.** `KoogMcpClient` is where a server's catalogue and results
+enter the app, and the one place that covers both the agent and the Tools
+screen, so the limits live there: a tool name outside the MCP naming rule is
+not published (and cannot be called), descriptions are clamped, a catalogue is
+capped by tool count and rendered size, and a result — or the message of an
+error the call raises instead — is cut at the user's *Largest tool response*
+budget, shared with `http_request`, with a marker.
 
 **Deadlines.** Every round trip carries an explicit deadline applied in our
 own code: **60 s** for a tool call, **30 s** for the connect handshake, both
@@ -1074,11 +1126,16 @@ Settings → Providers. Koog exposes no per-attempt hook, so a thin
 invocations; a retried `CLOUD` node surfaces each retry on the console as a
 muted `RUNTIME` warning (`Cloud retry 1/2 for openai`).
 
-**Deadlines.** `KoogClientFactory` applies an explicit `ConnectionTimeoutConfig`
-to every client it builds: **60 s socket**, **30 s connect**, **900 s request**.
+**Deadlines.** Every Koog model client — the chat clients `KoogClientFactory`
+builds and the embedding clients `DefaultKoogEmbedderFactory` builds — carries one
+shared `ConnectionTimeoutConfig`, `CloudClientTimeouts.CONFIG`: **60 s socket**,
+**30 s connect**, **900 s request**. `KoogClientTimeoutKonsistTest` refuses a
+construction that does not pass it; the embedding clients were once built without.
 The socket value is the load-bearing one, because Ktor applies it *per read* —
 it bounds how long a provider may stay **silent**, not how long a healthy
-answer may take, the same rule the task queue's silence valve uses. Passing
+answer may take, the same rule the task queue's silence valve uses. An
+embedding request is not streamed, so there the socket value bounds the wait
+for the whole answer (a batch is at most 64 texts). Passing
 no config is not a neutral choice: Koog's own default is 900 s for both request
 and socket, measured at 900 033 ms against a stalled provider. Unlike the MCP
 SSE path above, `HttpTimeout` *does* apply here.
@@ -1098,9 +1155,15 @@ a mid-answer cut on those two still reads as a short but complete reply.
 **Error text is scrubbed before it is shown.** Google authenticates by query
 parameter, so an ordinary socket timeout arrives carrying the API key in the
 quoted URL. `CloudErrorSanitizer` (pure `domain`) masks secret-bearing query
-parameters and `Bearer` fragments on the way to the console, the error banner,
-the persisted run trace and logcat, and substitutes the exception type for a
-message that trails off into the literal word `null`.
+parameters and `Bearer` fragments, and substitutes the exception type for a
+message that trails off into the literal word `null`. It is applied in three
+layers: each executor that calls a provider scrubs its own error; the engine
+redacts every node error, forwarded `Error` state and console line at the one
+point they all pass (so the run record, the exports, the console and the trace
+are covered even for an executor that forgets); and `CrashlyticsTimberTree`
+sends no error text at all — each link of a cause chain keeps only its type and
+stack frames, a message only its call-site template, never the values
+formatted into it — and still redacts the template as a backstop.
 
 **Cloud-backed structured output.** A structured node (§3.5) can run its
 validate-and-repair gate against a cloud provider instead of the on-device
@@ -1129,7 +1192,7 @@ path that the design deliberately constrains. The honest at-rest and
 threat-model framing lives in [`SECURITY.md`](../SECURITY.md); this section
 is the structural map.
 
-The six file tools and their effective risk:
+The seven file tools and their effective risk:
 
 | Tool         | `ToolRisk`     | Touches                                              |
 |--------------|----------------|-----------------------------------------------------|
@@ -1138,6 +1201,7 @@ The six file tools and their effective risk:
 | `find_files` | `READ_ONLY`    | glob search over relative paths                     |
 | `write_file` | `SENSITIVE`    | atomic create / overwrite, quota-checked            |
 | `edit_file`  | `SENSITIVE`    | unique-anchor find-replace in an existing file      |
+| `append_file`| `SENSITIVE`    | adds to the end of a file, creating it if missing   |
 | `delete_file`| `DESTRUCTIVE`  | irreversible single-file delete                     |
 | `http_request` | `SENSITIVE` (GET) / `DESTRUCTIVE` (POST/PUT/DELETE) | outbound HTTP(S) to an allowlisted host |
 
@@ -1148,8 +1212,11 @@ Two integrity boundaries sit underneath the risk gate:
   point every other method funnels through — and checked for containment. A
   `../` traversal, an absolute path, or a symlink that escapes the directory
   is refused with a typed `WorkspaceError.PathOutsideWorkspace` before any I/O
-  — a tool can only ever act inside the workspace. Size quotas
-  (`WorkspaceError.TooLarge` / `QuotaExceeded`) are enforced in the same layer.
+  — a tool can only ever act inside the workspace. A path the filesystem cannot
+  take, or a new name with control characters or over the length limits, is
+  `WorkspaceError.InvalidPath` (rules: `WorkspaceNamePolicy`). Size and entry
+  quotas (`WorkspaceError.TooLarge` / `QuotaExceeded`) are enforced in the same
+  layer, over one walk that never follows a symbolic link.
 - **The HTTP allowlist gate.** `http_request` is published to the agent only
   when the user's allowed-domains allowlist is non-empty (Settings → Tools →
   Allowed domains, persisted in DataStore under `allowed_http_domains`). The
@@ -1285,8 +1352,8 @@ Encryption applies to every table that may hold user-derived content:
   tool name and arguments awaiting approval, or the clarification
   question awaiting an answer.
 
-Secrets — the SQLCipher passphrase, per-provider cloud API keys, and
-the HuggingFace access token —
+Secrets — the SQLCipher passphrase, per-provider cloud API keys, the
+HuggingFace access token, and MCP credentials and custom headers —
 live in **`KeystoreBackedPrefsStore`** instances (`data/local/crypto/`):
 plain `SharedPreferences` files whose values are encrypted with
 **AES-256-GCM under a dedicated, non-exportable Android Keystore key**
@@ -1319,10 +1386,29 @@ The passphrase lifecycle is asymmetric by design
   (`DeferredPassphraseOpenHelperFactory`), not during dependency injection,
   so a keystore failure surfaces where the UI can handle it; best-effort
   background maintenance skips its work instead of crashing while the
-  recovery screen is up.
+  recovery screen is up. The upkeep a cold start arms from `MainActivity`
+  runs through `StartupMaintenance`, one isolated step at a time: it reads
+  the database while the splash is still finding out whether it opens, and
+  an uncaught throw there once killed the process before the recovery
+  screen could appear.
 - The API-key store applies the opposite, availability-first policy: a
   value that no longer decrypts is dropped and reported as unset — keys
   are user re-enterable, so availability wins there.
+- The confirmed wipe (`ResetLockedDatabaseUseCase`) deletes the database
+  and its passphrase through `DatabaseResetService`, then — only if that
+  succeeded — asks `AgentWorkspace`, `AttachmentStore` and
+  `TransientCacheSweeper` to erase their content. Settings and the other
+  secret stores are kept, and so are downloaded model files: the next
+  start's `RediscoverDownloadedModelsUseCase` (a stage of
+  `AppInitializationUseCase`) registers every model file in the downloads
+  directory that no registry row names. The start never loads the model
+  itself — the first run that needs it does, through `LoadModelUseCase`.
+
+None of these stores enters Android backup or device transfer
+([SECURITY.md § Backup and device transfer](../SECURITY.md#backup-and-device-transfer)).
+`PersistentStorageInventoryGuardTest` inventories every storage root the
+code uses, with its backup and wipe decision, and checks the backup rules
+and the wipe against it.
 
 Inside the encrypted database, `memory_chunks.embedding` is stored as a
 **BLOB of little-endian IEEE-754 float32 values** (4 bytes per
@@ -1355,13 +1441,16 @@ explicitly in [`SECURITY.md`](../SECURITY.md) (*Agent file workspace*).
 | **Agent workspace** (`files/agent_workspace/`) | Agent-produced and user-imported files (reports, exports, inputs)                                              | **FBE + app sandbox only** — *not* SQLCipher-encrypted (see `SECURITY.md`) |
 | **Attachment store** (`files/attachments/`) | Downscaled JPEG image attachments of chat messages                                                            | **FBE + app sandbox only** — *not* SQLCipher-encrypted (same posture as the workspace) |
 
-**Image attachments.** A user message can carry one image. The picked /
-captured content URI is read, decoded, EXIF-rotated, downscaled **preserving
-aspect ratio** (longest side ≤ 1536 px — a client-side storage bound; the model
-does its own token-budget resize at inference time) and re-encoded to JPEG into
-`files/attachments/` by `AttachmentStore` (domain interface; impl
-`data/local/AttachmentStoreImpl`). Only the derived file is kept; the original
-is never copied. The store-relative path plus MIME and pixel dimensions are
+**Image attachments.** A user message can carry one image. A picked or shared
+image is read from its content URI — only another app's `content://` provider,
+never a `file://` path or the app's own `FileProvider` (`ForeignContentUri`) — and
+a camera photo from its capture file in `cacheDir/images/` (`ImageCaptureStore`,
+which deletes the full-resolution original on every way out). The bytes are
+decoded, EXIF-rotated, downscaled **preserving aspect ratio** (longest side
+≤ 1536 px — a client-side storage bound; the model does its own token-budget
+resize at inference time) and re-encoded to JPEG into `files/attachments/` by
+`AttachmentStore` (domain interface; impl `data/local/AttachmentStoreImpl`). Only
+the derived file is kept. The store-relative path plus MIME and pixel dimensions are
 persisted on `chat_messages` (nullable columns added in `MIGRATION_38_39`,
 schema v39) and carried on the domain `ChatMessage` / `AgentTask` as
 `MessageAttachment`. By contract the attachment rides the **user message** but
@@ -1372,6 +1461,12 @@ a daily `AttachmentOrphanCleanupWorker` (mirroring `RunRetentionWorker`) sweeps
 files no message references — the same charging + idle maintenance window. The
 sweep skips files younger than a 24 h grace window, so an attachment that is
 already on disk but not yet sent (still in the composer) is never reclaimed.
+The same worker then runs `TransientCacheSweeper` over every handoff directory
+in the cache registered in `TransientCacheDirectory` (camera captures, workspace
+share copies, journal exports, voice clips), removing entries older than an hour
+— the backstop for a file its owner never got to clean up.
+`TransientCacheDirectoryGuardTest` refuses a cache directory that is not in the
+registry.
 
 **Audio clips (transient, not a storage tier).** Voice-input clips are *not*
 persisted alongside attachments: `AudioCaptureStore` writes them to the app
@@ -1552,7 +1647,11 @@ in two phases:
 
 1. **Live phase** — the run suspends on an in-process deferred; the
    chat card or the approval notification completes it. This is the
-   only phase an interactive, foregrounded session normally sees.
+   only phase an interactive, foregrounded session normally sees. The
+   notifications of both phases build their actions through one helper
+   in `ApprovalNotificationManager`: a `DESTRUCTIVE` call gets **Review
+   in chat** instead of **Approve**, because the typed confirmation the
+   card asks for cannot be collected from the shade.
 2. **Persistent phase (park)** — when the live wait times out (the UI
    is gone, the user did not respond), the run **parks**: the staged
    tool name and arguments are written to `pending_interactions`, the
@@ -1562,10 +1661,36 @@ in two phases:
    denying from it — even after process death — records the decision
    onto the parked record and resumes the run from its checkpoint, where
    the `TOOL` node consumes the decision under a TOCTOU guard (the
-   re-resolved tool call must match the parked snapshot exactly).
+   re-resolved tool call must match the parked snapshot exactly, and an
+   approval must meet the same risk it was given at; a denial applies at
+   any risk). The decision is consumed before anything can end the gate
+   early, and applied whatever the approval policy says at resume time:
+   the policy only decides whether a *new* question is needed, so a denial
+   recorded under a strict policy stays a denial after the user relaxes
+   it. An answer the guard does not let through is not dropped into the
+   policy either — the question is raised again, whatever the policy.
    Clarifications park the same way, answered via a deep link into the
    chat. An unanswered park is failed by the maintenance pass once the
    user-configurable **approval window** (default 24 h) elapses.
+
+**An answer is addressed to a request, never to a session.** The gate
+mints an identity (`requestId`) for every request it raises; the
+`WaitingForApproval` state, the chat card, both notifications and the
+parked record all carry it, and `SubmitApprovalDecisionUseCase` — the one
+channel an answer reaches the gate through — settles the live gate only
+when it waits on that identity, and otherwise only the parked record of
+that identity (`recordApprovalDecision` writes only while the record
+still parks it). The session cannot serve as the address: a park ends the
+task and frees the serial queue worker, so a parked request and a live one
+coexist in one session whenever a second run starts there, and "whatever
+the session is waiting on" would let the answer given for one request
+settle another. The same identity keys the notification: the live and the
+persistent notification of one request share a slot, two requests get two,
+and the gate removes a request's notification on every way its wait ends
+except a park, whose ongoing notification takes over the slot.
+`HitlDispatchKonsistTest` pins the seams this rests on — the call sites of
+`executeTool`, `invokeByName` and `resumeWithApproval`, and who may hold a
+built-in tool executor.
 
 ### 6.3. Run retention
 
@@ -1606,7 +1731,11 @@ surfaces enqueue work into the same background path:
   tile** — start a run from outside the app. Each is **inert until the
   user binds a pipeline** (the privacy default) and enqueues with an
   explicit `pipelineId` so it runs the user's choice regardless of the
-  app default. A third surface, **external automation**, lets another app
+  app default. The share activity is exported without a permission, so any
+  installed app can start it directly: `LaunchSharePipelineUseCase` admits a
+  share against `RunRateCeiling.SHARE` through `ShareAdmissionRepository`
+  (count and record in one DataStore `edit`) before it stores or runs
+  anything. A third surface, **external automation**, lets another app
   on the device ask for a run. Its binding is deliberately stricter than
   the other two — an **allowlist** rather than a default, so a request
   naming any other pipeline is refused rather than redirected. The request
@@ -1619,14 +1748,19 @@ surfaces enqueue work into the same background path:
   its request journal is a screen of its own
   (`presentation/ui/automation/`), reading the same `domain` dictionaries so
   the user-facing sentences and the persisted discriminators cannot drift.
+  Its callbacks leave through one seam, `ExternalAutomationCallbackSender`
+  (the app's only `sendBroadcast`), which sends nothing while the contract
+  is off and nothing over the contract's length ceilings.
   See [external-automation.md](external-automation.md).
 
-Neither is a new execution path. Both land on
-`TaskScheduler.scheduleOneTime(...)` (the `WorkManagerTaskScheduler`
-impl), which drives `AgentWorker` → the **same** `TaskQueueManager` →
-`GraphExecutionEngine` chain as a `schedule_task` run — only the
-`RunOrigin` differs (`TRIGGER` / `SHARE` / `QUICK_TILE` / `EXTERNAL`),
-recorded on the persistent `pipeline_runs` record for accounting. Everything in §6.1–§6.3
+Neither is a new execution path. A trigger, a tile tap and an admitted
+external request land on `TaskScheduler.scheduleOneTime(...)` (the
+`WorkManagerTaskScheduler` impl), which drives `AgentWorker` → the **same**
+`TaskQueueManager` → `GraphExecutionEngine` chain as a `schedule_task`
+run — only the `RunOrigin` differs (`TRIGGER` / `QUICK_TILE` /
+`EXTERNAL`), recorded on the persistent `pipeline_runs` record for
+accounting. A share (`SHARE`) enters the same `TaskQueueManager` directly,
+as an interactive run, because the app opens into it. Everything in §6.1–§6.3
 therefore applies unchanged: the persisted run lifecycle, foreground-service
 promotion, headless engine unload, the two-phase HITL gate (a `SENSITIVE`
 / `DESTRUCTIVE` tool inside an **unattended** trigger run **parks** on a

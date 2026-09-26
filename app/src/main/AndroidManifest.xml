@@ -35,21 +35,18 @@
     <!--
         The agent must be able to see other AppFunction-providing
         packages via `PackageManager.canPackageQuery` so
-        `AppFunctionManager.observeAppFunctions` surfaces their metadata. Android 11+
+        `AppFunctionManager.searchAppFunctions` surfaces their metadata. Android 11+
         ships with package visibility on by default; without an explicit `<queries>`
         entry the system filters cross-package metadata out.
 
-        Both shapes are declared:
-          - `<intent>` with the system AppFunctionService action makes the agent visible
-            to every package that publishes an `@AppFunction`, future-proofing the
-            visibility surface for production peers (the agent does not know their
-            applicationIds at compile time).
-          - The explicit `<package>` for `app.knotwork.android.toolsprobe` is the e2e test's
-            target and is kept as a belt-and-suspenders fallback in case the system
-            indexer evaluates the explicit form before the intent-filter form.
+        The `<intent>` with the system AppFunctionService action makes the agent
+        visible to every package that publishes an `@AppFunction` (the agent does not
+        know their applicationIds at compile time). The end-to-end test's target,
+        `app.knotwork.android.toolsprobe`, is also named explicitly — in the debug
+        overlay, since the test runs on debug builds and a release build has no
+        business seeing a package that exists only on a test device.
     -->
     <queries>
-        <package android:name="app.knotwork.android.toolsprobe" />
         <intent>
             <action android:name="android.app.appfunctions.AppFunctionService" />
         </intent>
@@ -72,10 +69,9 @@
 
     <application
         android:name=".App"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="true"
-        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -105,10 +101,12 @@
                 tools:node="remove" />
         </provider>
 
-        <!-- FileProvider for sharing exported workspace files. The Files screen
-             stages a per-share copy into cacheDir/shared and grants temporary
-             read access to the receiving app, so the workspace directory itself
-             is never exposed. -->
+        <!-- FileProvider for the app's handoff files (res/xml/file_paths.xml):
+             workspace share copies staged into cacheDir/shared, camera captures,
+             journal exports. Grants are temporary and per file, so the workspace
+             directory itself is never exposed. Being unexported does not stop the
+             app's own uid from opening it, which is why a URI another app hands
+             over is refused when it names this provider (ForeignContentUri). -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -151,6 +149,17 @@
             apps and routes it through the user's bound share pipeline. The
             activity is invisible (translucent theme) — it only resolves the
             share and deep-links into the resulting chat session.
+
+            Exported without a permission, and it has to be: the share sheet
+            starts it on the sending app's behalf. The same means any installed
+            app (and adb) can start it directly, without the share sheet, and put
+            text where the user's own message goes. So LaunchSharePipelineUseCase
+            gates it rather than this declaration: inert until a share pipeline is
+            bound, at most RunRateCeiling.SHARE runs an hour (one budget for every
+            sender — the sender is not known), the image pre-flight, and only
+            another app's content:// URI is read. The run is visible: the app opens
+            into its chat. SECURITY.md names this surface; ExportedComponentInventoryTest
+            fails when an export is added or loses its permission.
         -->
         <activity
             android:name=".presentation.share.ShareReceiverActivity"
@@ -184,15 +193,31 @@
         </service>
 
         <!--
-            Callee-side AppFunctions surface is served by an auto-merged service
-            from `appfunctions-service`. Which one is chosen by the library's own
-            resource qualifier, not by us: `PlatformAppFunctionService` on API 36+,
-            `ExtensionAppFunctionService` below it (the AAR ships `values/` and
-            `values-v36/` toggling a boolean each way). Since `minSdk` is 34, both
-            branches are reachable in the field. Functions are discovered through
-            `@AppFunction`-annotated classes (see [SearchAppFunction]); the agent only
-            needs to publish them — no hand-rolled `AppFunctionService` subclass.
+            The AppFunctions Knotwork publishes to other apps. The class is generated
+            by the AppFunctions compiler from the entry point `AgentAppFunctionService`
+            (its `serviceName`), and `v2` names the inventory the compiler writes to
+            `assets/` (its `appFunctionXmlFileName` plus `.xml`) —
+            `AppFunctionServiceManifestGuardTest` keeps all three in step, since a
+            mismatch builds and runs and only shows as a function no one can find.
+            Only the system may bind it (`BIND_APP_FUNCTION_SERVICE`), and only a
+            privileged agent holding `EXECUTE_APP_FUNCTIONS` may call through it.
+            Android 16+ only: the service extends the platform class added in API 36.
         -->
+        <service
+            android:name=".data.tools.local.appfunctions.KnotworkAppFunctionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_APP_FUNCTION_SERVICE"
+            tools:targetApi="36">
+            <property
+                android:name="android.app.appfunctions.schema"
+                android:value="app_functions_schema.xsd" />
+            <property
+                android:name="android.app.appfunctions.v2"
+                android:value="knotwork_app_functions.xml" />
+            <intent-filter>
+                <action android:name="android.app.appfunctions.AppFunctionService" />
+            </intent-filter>
+        </service>
 
         <service
             android:name=".data.services.AgentForegroundService"
@@ -244,7 +269,8 @@
             the callers it is for, so the gate is placed where the user can see it
             instead: the contract is off by default, inert until the user binds one
             pipeline to it, rate-ceilinged, and every request — admitted or refused
-            — is journalled. Human-in-the-loop confirmation and the destructive-tool
+            — is journalled. While it is off nothing is sent back to any caller
+            (ExternalAutomationCallbackSender, the app's only broadcast). Human-in-the-loop confirmation and the destructive-tool
             block apply unchanged, because an admitted request goes through the very
             same scheduler path as the app's own background work.
 

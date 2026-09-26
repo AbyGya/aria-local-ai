@@ -9,6 +9,7 @@ import app.knotwork.android.domain.models.PromptPackParseError
 import app.knotwork.android.domain.models.PromptPackVersionMismatch
 import app.knotwork.android.domain.models.PromptPreset
 import app.knotwork.android.domain.models.RefusedCapability
+import app.knotwork.android.domain.text.toDisplaySafe
 
 /**
  * Two-way mapper between a [PromptPreset] and its **prompt-pack** file form:
@@ -106,13 +107,6 @@ object PromptPackMarkdownSerializer {
     private const val MAX_REPORTED_VALUES = 5
 
     /**
-     * Characters a text renderer treats as a line break. `U+2028` and
-     * `U+2029` are the ones that matter: neither is an ISO control character,
-     * so neither is caught by the general filter.
-     */
-    private val LINE_BREAKS = charArrayOf('\n', '\r', '\u2028', '\u2029')
-
-    /**
      * Renders [preset] into its prompt-pack file form.
      *
      * @param preset The prompt to write out. Bundled presets serialise just
@@ -187,15 +181,20 @@ object PromptPackMarkdownSerializer {
             is FrontmatterParseResult.Parsed -> result
         }
 
-        val name = parsed.scalar("name")
+        val rawName = parsed.scalar("name")
             ?: return PromptPackImportOutcome.Failure(PromptPackParseError.MissingRequiredKey("name"))
-        if (name.isEmpty()) {
-            return PromptPackImportOutcome.Failure(PromptPackParseError.MissingRequiredKey("name"))
-        }
-        if (name.length > PromptPresetConstants.MAX_NAME_LENGTH) {
+        if (rawName.length > PromptPresetConstants.MAX_NAME_LENGTH) {
             return PromptPackImportOutcome.Failure(
                 PromptPackParseError.NameTooLong(PromptPresetConstants.MAX_NAME_LENGTH),
             )
+        }
+        // Flattened, as a pipeline name is: the name is quoted in the dialog
+        // that lists what was left out and in the success snackbar, and a
+        // value is one line only by `lines()`, which keeps U+2028 / U+202E.
+        // Within the ceiling already, so nothing is cut.
+        val name = rawName.toDisplaySafe(maxLength = PromptPresetConstants.MAX_NAME_LENGTH, ellipsis = "")
+        if (name.isEmpty()) {
+            return PromptPackImportOutcome.Failure(PromptPackParseError.MissingRequiredKey("name"))
         }
 
         val rawNodeType = parsed.scalar("nodeType")
@@ -291,31 +290,17 @@ object PromptPackMarkdownSerializer {
     }
 
     /**
-     * Makes an attacker-supplied string safe to show: line breaks and control
-     * characters out, whitespace runs collapsed, length clamped.
+     * Makes an attacker-supplied string safe to show: line breaks, control and
+     * bidi characters out, whitespace runs collapsed, length clamped — the rule
+     * every importer shares ([toDisplaySafe]).
      *
      * Without this a crafted file can write its own dialog — a break plus
      * enough characters turns a "left out" list item into what looks like the
-     * app's own sentence.
-     *
-     * `\n` and `\r` cannot reach here through today's grammar (a value is
-     * one line by construction), but `U+2028` and `U+2029` can: they are not
-     * ISO control characters and Kotlin's `lines()` does not split on them,
-     * yet a text renderer breaks on both. They are named explicitly rather
-     * than left to `isISOControl`, and the ASCII breaks are stripped anyway
-     * so that a later change to the grammar cannot quietly reopen this.
+     * app's own sentence. `U+2028` / `U+2029` can reach here through today's
+     * grammar even though `\n` cannot: a value is one line by construction, but
+     * a text renderer breaks on both separators and Kotlin's `lines()` does not.
      */
-    private fun sanitize(raw: String): String {
-        val flattened = raw.map { if (it.isISOControl() || it in LINE_BREAKS) ' ' else it }
-            .joinToString(separator = "")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-        return if (flattened.length > MAX_REPORTED_VALUE_LENGTH) {
-            flattened.take(MAX_REPORTED_VALUE_LENGTH - 1) + "…"
-        } else {
-            flattened
-        }
-    }
+    private fun sanitize(raw: String): String = raw.toDisplaySafe(MAX_REPORTED_VALUE_LENGTH)
 
     /**
      * Quotes a scalar on the way out when leaving it bare would change how

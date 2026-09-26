@@ -1,14 +1,20 @@
 import app.knotwork.android.buildtools.BrowserEditorConstantsGenerator
+import app.knotwork.android.buildtools.BrowserEditorFlatExportGuard
+import app.knotwork.android.buildtools.BrowserEditorImportParityGuard
 import app.knotwork.android.buildtools.BrowserEditorInertControlGuard
+import app.knotwork.android.buildtools.BrowserEditorRuntimeFieldGuard
 import app.knotwork.android.buildtools.CookbookDocsGenerator
 import app.knotwork.android.buildtools.DetektAnalysisModeGuard
 import app.knotwork.android.buildtools.DexInstantiabilityChecker
+import app.knotwork.android.buildtools.DexInvocationChecker
 import app.knotwork.android.buildtools.DocumentationRef
 import app.knotwork.android.buildtools.ExternalAutomationDocsGenerator
 import app.knotwork.android.buildtools.FileMapSpec
 import app.knotwork.android.buildtools.GenerateDocumentationLinksTask
 import app.knotwork.android.buildtools.GenerateFileMapTask
+import app.knotwork.android.buildtools.GitCommitId
 import app.knotwork.android.buildtools.LintBaselineGuard
+import app.knotwork.android.buildtools.PinnedNdk
 import app.knotwork.android.buildtools.R8MappingChecker
 import app.knotwork.android.buildtools.ReleaseVersionChecker
 import app.knotwork.android.buildtools.ReportExternalDocLinksTask
@@ -22,29 +28,37 @@ import app.knotwork.android.buildtools.VerifyDocsHygieneTask
 import app.knotwork.android.buildtools.VerifyDocumentationLinksTask
 import app.knotwork.android.buildtools.VerifyFileMapTask
 import app.knotwork.android.buildtools.VerifyForbiddenVocabularyTask
+import app.knotwork.android.buildtools.VerifyKeepRuleTargetsTask
+import app.knotwork.android.buildtools.VerifyMergedManifestTask
 import app.knotwork.android.buildtools.VerifyMermaidDiagramsTask
 import app.knotwork.android.buildtools.VerifyNoOrphanedKdocTask
+import app.knotwork.android.buildtools.VerifyNoSlf4jProviderTask
+import app.knotwork.android.buildtools.VerifySupplyChainPinsTask
 import app.knotwork.android.buildtools.VerifyVersionSourcesTask
+import com.android.build.api.artifact.ScopedArtifact
 import com.android.build.api.artifact.SingleArtifact
+import com.android.build.api.variant.ScopedArtifacts
 import dev.detekt.gradle.Detekt
 import java.util.Properties
 import java.util.zip.ZipFile
 
 /**
- * Resolves the current short git SHA (e.g. `19b9c8f`) via
- * `providers.exec("git", "rev-parse", "--short", "HEAD")`. Returns
- * `"unknown"` when git is absent, the working tree is not a repository,
- * or the command otherwise fails (e.g. a tarball-based release build on a
- * CI runner that lacks git history).
+ * Resolves the commit identifier baked into `BuildConfig.GIT_SHA`: the first
+ * eight characters of the full hash of `HEAD` (e.g. `19b9c8f0`), via
+ * [GitCommitId]. Not `git rev-parse --short`, whose length follows the clone's
+ * depth and the host's `core.abbrev` — one commit then compiled to two different
+ * dex files on CI and on a full clone. Returns `"unknown"` when git is absent,
+ * the working tree is not a repository, or the command otherwise fails (e.g. a
+ * tarball-based build with no git history).
  */
 fun Project.resolveGitSha(): String = runCatching {
     val output = providers.exec {
-        commandLine("git", "rev-parse", "--short", "HEAD")
+        commandLine(GitCommitId.COMMAND)
         isIgnoreExitValue = true
     }
     val exitCode = output.result.get().exitValue
     if (exitCode == 0) {
-        output.standardOutput.asText.get().trim().ifEmpty { "unknown" }
+        GitCommitId.of(output.standardOutput.asText.get()) ?: "unknown"
     } else {
         "unknown"
     }
@@ -159,16 +173,7 @@ plugins {
     // `assembleFossRelease` build never loads them.
 }
 
-// The androidx.appfunctions KSP processor generates the per-class
-// `*_AppFunctionInventory.kt` / `*_AppFunctionInvoker.kt` artefacts unconditionally,
-// but the leaf-application `app_functions_v2.xml` (and the legacy `app_functions.xml`)
-// that the platform's AppSearch indexer actually reads at install time is only produced
-// when `appfunctions:aggregateAppFunctions=true`. Without this flag the agent APK ships
-// `app_functions_schema.xsd` but no inventory XML, so the system AppFunctionManager has
-// no `search_tool` entry to advertise to other apps and the callee-side scenario in
-// `AppFunctionsEndToEndTest` comes back empty.
 ksp {
-    arg("appfunctions:aggregateAppFunctions", "true")
     // Export the Room schema for every version so that
     // `MigrationTestHelper` can validate migrations against frozen JSON
     // snapshots in `app/schemas/`. The corresponding `exportSchema = true`
@@ -182,13 +187,20 @@ android {
     compileSdk {
         version = release(37)
     }
+    // The NDK whose `llvm-strip` strips the prebuilt native libraries. The app
+    // compiles no native code, but left to its default AGP silently packages the
+    // libraries unstripped on a host that lacks its default NDK — the same commit
+    // then shipped different `.so` bytes from CI and from a laptop. Pinned in the
+    // version catalog; `verify<Variant>PinnedNdk` below fails a release build
+    // without it.
+    ndkVersion = libs.versions.ndk.get()
 
     defaultConfig {
         applicationId = "app.knotwork.android"
         minSdk = 34
         targetSdk = 37
-        versionCode = 14
-        versionName = "0.10.1"
+        versionCode = 15
+        versionName = "0.11.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -234,6 +246,17 @@ android {
                 storePassword = releaseSigning.storePassword
                 keyAlias = releaseSigning.keyAlias
                 keyPassword = releaseSigning.keyPassword
+                // APK Signature Scheme v3 next to v2 (v1 is off at this minSdk).
+                // v3 is the scheme a signing-key rotation is expressed in; with a
+                // single key it changes nothing a device can observe, and it does
+                // not make a LOST key recoverable — a rotation is signed by the
+                // old key. v2 has to be asked for explicitly: at minSdk >= 28 AGP
+                // drops it as soon as v3 is on (measured: a v3-only APK), while
+                // every artefact published so far is v2 — keeping it makes the
+                // change purely additive. `release.yml` checks each published APK
+                // carries both.
+                enableV2Signing = true
+                enableV3Signing = true
             }
         }
     }
@@ -761,10 +784,11 @@ kover {
                     // catalog snapshot suite, not JVM unit tests.
                     "app.knotwork.android.presentation.ui.settings.provider.ProviderPickerScreen*",
                     "app.knotwork.android.presentation.ui.settings.provider.ProviderDetailScreen*",
-                    // AppFunctions callee-side wrapper (SearchAppFunction). The
-                    // KSP-generated `*_AppFunctionInvoker` infrastructure and
-                    // the platform `PlatformAppFunctionService` need the Android
-                    // runtime plus the AppFunctions service host to execute.
+                    // AppFunctions callee side: the `AgentAppFunctionService`
+                    // entry point, the service and inventory the compiler
+                    // generates next to it, and the `SearchAppFunction` body
+                    // (unit-tested, but sharing the package). The service needs
+                    // the Android 16 AppFunctions host to run.
                     "app.knotwork.android.data.tools.local.appfunctions.*",
                     // `data.services.*` is now covered by
                     // Robolectric tests (`AgentForegroundServiceTest`,
@@ -778,11 +802,9 @@ kover {
                     // `AgentApprovalReceiverTest`). The exclusions that lived
                     // here while those packages waited for ShadowNotificationManager
                     // / BroadcastReceiver coverage have been lifted.
-                    // Tool-execution Android glue (AppFunctions service, search
+                    // Tool-execution Android glue (AppFunctions caller, search
                     // tool HTTP client, delegate-task LLM bridge) needs either
                     // an Android runtime or live LLM/HTTP fixtures.
-                    "app.knotwork.android.data.tools.local.AgentAppFunctionService",
-                    "app.knotwork.android.data.tools.local.AgentAppFunctionService$*",
                     "app.knotwork.android.data.tools.local.LocalAppFunctionManager",
                     "app.knotwork.android.data.tools.local.SearchTool*",
                     "app.knotwork.android.data.tools.local.DelegateTaskTool*",
@@ -1110,6 +1132,13 @@ val browserEditorTemplateFiles: Set<File> =
     fileTree("$projectDir/src/main/assets/presets/prompts") { include("*.json") }.files
 val browserEditorPresetCatalogFile =
     file("$projectDir/src/main/java/app/knotwork/android/domain/constants/BundledPresetCatalog.kt")
+// The app's own reading rules the editor's import is checked against (not generated from).
+val browserEditorSerializerFile =
+    file("$projectDir/src/main/java/app/knotwork/android/domain/pipelineio/PipelineJsonSerializer.kt")
+val browserEditorCloudProviderFile =
+    file("$projectDir/src/main/java/app/knotwork/android/domain/models/CloudProvider.kt")
+val browserEditorRouteLabelsFile =
+    file("$projectDir/src/main/java/app/knotwork/android/domain/models/RouteLabels.kt")
 // Every file whose content feeds the generated blocks; drives up-to-date checks.
 val browserEditorInputFiles: Set<File> = browserEditorClassSourceFiles + browserEditorPresetFiles +
     browserEditorTemplateFiles + setOf(
@@ -1239,6 +1268,7 @@ val verifyBrowserEditorConstants by tasks.registering {
         "Fails the build if pipeline-editor.html AUTO-GEN constant blocks have drifted from the Android domain sources."
     inputs.files(browserEditorInputFiles)
     inputs.file(browserEditorHtmlFile)
+    inputs.files(browserEditorSerializerFile, browserEditorCloudProviderFile, browserEditorRouteLabelsFile)
     doLast {
         val drifted = BrowserEditorConstantsGenerator.drift(
             html = browserEditorHtmlFile.readText(),
@@ -1268,6 +1298,48 @@ val verifyBrowserEditorConstants by tasks.registering {
                 "pipeline-editor.html offers controls for fields no run reads: ${inert.joinToString(", ")}.\n" +
                     "Remove them from renderFormFields (and their validation); keep the fields in the " +
                     "envelope encode/decode so files still round-trip. See docs/decisions/0005.",
+            )
+        }
+        // Also outside the generated blocks: everything the editor derives for the
+        // run must travel in the exported `config` block — the app's node sheet shows
+        // that copy, so a derived field left out is a browser setting lost on import.
+        val unexported = BrowserEditorFlatExportGuard.unexportedFlatFields(browserEditorHtmlFile.readText())
+        if (unexported.isNotEmpty()) {
+            throw GradleException(
+                "pipeline-editor.html derives run-time fields it never exports: ${unexported.joinToString(", ")}.\n" +
+                    "Add them to the `config` block in exportToJson — the app runs, and shows, only that copy.",
+            )
+        }
+        // Every field the app runs on must survive the editor end to end: read from the
+        // file's flat copy, offered as a control, written back into both copies and
+        // exported. The fields are the cookbook's Runtime verdicts, not the editor's lists.
+        val broken = BrowserEditorRuntimeFieldGuard.brokenLinks(
+            html = browserEditorHtmlFile.readText(),
+            reach = CookbookDocsGenerator.FIELD_REACH,
+        )
+        if (broken.isNotEmpty()) {
+            throw GradleException(
+                "pipeline-editor.html loses run-time fields between import and export:\n" +
+                    broken.joinToString("\n") { "  - $it" } + "\n" +
+                    "Each field in CookbookDocsGenerator.FIELD_REACH with a Runtime verdict must pass " +
+                    "importFromJson → deriveRichFromFlat → renderFormFields → encodeRichEnvelope / " +
+                    "richToFlat → exportToJson, and decodeRichEnvelope must not read it from the envelope.",
+            )
+        }
+        // And the editor must read a file by the app's rules: the same config keys, the
+        // same Input-data flags, the same provider ids, the same branch labels — checked
+        // against the app's source.
+        val parity = BrowserEditorImportParityGuard.mismatches(
+            html = browserEditorHtmlFile.readText(),
+            serializerSource = browserEditorSerializerFile.readText(),
+            cloudProviderSource = browserEditorCloudProviderFile.readText(),
+            routeLabelsSource = browserEditorRouteLabelsFile.readText(),
+        )
+        if (parity.isNotEmpty()) {
+            throw GradleException(
+                "pipeline-editor.html reads a pipeline file differently from the app:\n" +
+                    parity.joinToString("\n") { "  - $it" } + "\n" +
+                    "People inspect a file in the browser before importing it; it must show what the app runs.",
             )
         }
     }
@@ -1761,6 +1833,21 @@ tasks.withType<Test>().configureEach {
     inputs.dir(rootProject.file("fastlane/metadata"))
         .withPropertyName("storeMetadata")
         .withPathSensitivity(PathSensitivity.RELATIVE)
+    // `TopBarInsetGuardTest` and `SnackbarHostGuardTest` read the design system's
+    // sources as text. A `:catalog` edit usually re-runs this task through the
+    // compiled classpath anyway, but an edit that leaves the bytecode as it was (a
+    // modifier reordered into the same calls) would not — declared, not assumed.
+    inputs.dir(rootProject.file("catalog/src/main/java"))
+        .withPropertyName("catalogSources")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    // `AppFunctionServiceManifestGuardTest` reads the probe app's entry point and
+    // manifest, which are on no classpath of this module.
+    inputs.dir(rootProject.file("tools-probe/src/main"))
+        .withPropertyName("toolsProbeSources")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file(rootProject.file("tools-probe/build.gradle.kts"))
+        .withPropertyName("toolsProbeBuildScript")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.dir(layout.projectDirectory.dir("src/androidTest"))
         .withPropertyName("instrumentedSources")
         .withPathSensitivity(PathSensitivity.RELATIVE)
@@ -1790,6 +1877,34 @@ tasks.withType<Test>().configureEach {
     inputs.file(rootProject.file("pipeline-editor.html"))
         .withPropertyName("browserEditorHtml")
         .withPathSensitivity(PathSensitivity.RELATIVE)
+    // `ApprovalPolicyDocumentsTest` pins the approval sentences of the threat model
+    // and the user guide to the code; both are read from the repository root.
+    inputs.file(rootProject.file("SECURITY.md"))
+        .withPropertyName("securityPolicy")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file(rootProject.file("docs/user-guide.md"))
+        .withPropertyName("userGuide")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    // `WorkspaceToolsDocumentedTest` reads the tool enumerations of the architecture
+    // map and the extension guide (and of SECURITY.md, declared above).
+    inputs.file(rootProject.file("docs/architecture.md"))
+        .withPropertyName("architectureDocument")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file(rootProject.file("docs/extending.md"))
+        .withPropertyName("extendingGuide")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    // `ExportedComponentInventoryTest` reads every source set's manifest. A variant's
+    // test task sees only its own overlays, so an export added to `src/full` left
+    // `testFossDebugUnitTest` UP-TO-DATE and green — measured, with the guard wrong
+    // on disk. The pattern takes in `src/main`'s manifest as well.
+    inputs.files(fileTree("src") { include("*/AndroidManifest.xml") })
+        .withPropertyName("sourceManifests")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    // `EntrySurfaceLimitsDocumentsTest` pins the published contract's numbers to the
+    // code (SECURITY.md and the user guide are declared above).
+    inputs.file(rootProject.file("docs/external-automation.md"))
+        .withPropertyName("externalAutomationContract")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
 }
 
 // Hilt/Dagger reads Kotlin metadata via `kotlin-metadata-jvm`, which is unshaded
@@ -1803,6 +1918,26 @@ configurations.configureEach {
     resolutionStrategy {
         force("org.jetbrains.kotlin:kotlin-metadata-jvm:${libs.versions.kotlin.get()}")
     }
+    // Koog's telemetry feature and the OpenTelemetry SDK it brings in: exporters for
+    // Langfuse, W&B Weave, Datadog and any OTLP endpoint. The app never installs the
+    // feature — it builds no Koog `AIAgent` — so the code only ever sat in the APK
+    // unreachable. Excluded in every configuration, so it is absent rather than
+    // unused: a later Koog version that calls it from a client the app does use fails
+    // at the call instead of sending traces past `ModelNetworkGate` and the privacy
+    // indicator. Nothing else on the classpath references it (measured on the
+    // release classpath; docs/release.md §5).
+    exclude(group = "ai.koog", module = "agents-features-opentelemetry")
+    exclude(group = "ai.koog", module = "agents-features-opentelemetry-android")
+    exclude(group = "io.opentelemetry")
+    exclude(group = "io.opentelemetry.kotlin")
+    // The SLF4J provider Koog's Android client module brings in at runtime. It
+    // wrote every `INFO`+ line logged through SLF4J to `System.err` — on Android,
+    // logcat — past the redaction the app applies to its own logs, and some of
+    // Koog's lines are model output: a reasoning trace at `INFO`, a whole response
+    // when a provider's reply has no parts. Without a provider, SLF4J 2 falls
+    // back to its no-op logger. `verify<Variant>NoSlf4jProvider` keeps any other
+    // provider out.
+    exclude(group = "org.slf4j", module = "slf4j-simple")
 }
 
 dependencies {
@@ -1867,6 +2002,19 @@ dependencies {
     // longer there. See `docs/release.md` § FOSS / F-Droid build.
     implementation(libs.mediapipe.tasks.text)
 
+    // MediaPipe brings protobuf-javalite 4.26.1, inside the range of
+    // CVE-2024-7254 (unbounded recursion on nested groups, fixed in 4.27.5). The
+    // app parses no protobuf of its own — MediaPipe reads the task graph it builds
+    // itself — but raising the runtime costs one constraint: protobuf supports
+    // gencode of 4.26 on any 4.x or 5.x runtime. Its failure modes are release- and
+    // device-only (protobuf instantiates reflectively), which is what the R8 keep
+    // rules and `verify<Variant>Instantiable` below exist for.
+    constraints {
+        implementation(libs.protobuf.javalite) {
+            because("CVE-2024-7254: MediaPipe 1.0.0 resolves protobuf-javalite 4.26.1; the fix is 4.27.5")
+        }
+    }
+
     // Koog Framework
     implementation(libs.koog.agents)
     implementation(libs.koog.mcp)
@@ -1887,7 +2035,6 @@ dependencies {
 
     // AppFunctions
     implementation(libs.androidx.appfunctions)
-    implementation(libs.androidx.appfunctions.service)
     ksp(libs.androidx.appfunctions.compiler)
 
     // Markdown
@@ -1999,9 +2146,18 @@ val r8ProtectedPackages: List<String> = listOf("com.google.common.flogger.")
 // cannot see. MediaPipe parses its task graph as a protobuf on every
 // `TextEmbedder.createFromOptions`, so an abstractified message class breaks
 // the on-device embedding path — and therefore all of long-term memory.
+//
+// The AppFunctions service is KSP output of this app that the platform binds BY
+// NAME, from the manifest, to dispatch every `@AppFunction` call. The manifest
+// reference keeps it today; a renamed or abstractified class would leave the
+// function listed and every call to it failing to bind. Being in the dex under its
+// own name, concrete, is exactly what this check asserts. (Until the entry-point
+// model, these were the aggregated invoker and inventory the library loaded by name;
+// the generated service now reaches its inventory by an ordinary call.)
 val r8RequiredInstantiableClasses: List<String> = listOf(
     "com.google.protobuf.Any",
     "com.google.protobuf.UnknownFieldSetLite",
+    "app.knotwork.android.data.tools.local.appfunctions.KnotworkAppFunctionService",
 )
 androidComponents {
     onVariants { variant ->
@@ -2083,6 +2239,117 @@ androidComponents {
             }
         }
 
+        // MediaPipe's usage logger must never send. `proguard-rules.pro` removes
+        // its one call site with `-assumenosideeffects`; the declaration stays
+        // (MediaPipe is kept whole), so the mapping cannot show whether the call
+        // is gone — only the instructions can. Read with the SDK's `dexdump`, a
+        // line at a time: the disassembly runs to millions of lines.
+        val dexdumpSdk = androidComponents.sdkComponents.sdkDirectory
+        val buildTools = android.buildToolsVersion
+        val verifyNoMediaPipeTelemetry = tasks.register("verify${variantName}NoMediaPipeTelemetry") {
+            group = "verification"
+            description = "Fails the release build if MediaPipe's usage logger can still send an event."
+            inputs.files(apkDir).withPropertyName("packagedApk")
+            val checkedVariant = variant.name
+            val loader = variant.artifacts.getBuiltArtifactsLoader()
+            doLast {
+                val apk = loader.load(apkDir.get())
+                    ?.elements
+                    ?.map { File(it.outputFile) }
+                    ?.firstOrNull { it.exists() }
+                    ?: throw GradleException(
+                        "Telemetry check cannot run for `$checkedVariant`: no packaged APK was found.",
+                    )
+                val dexdump = File(dexdumpSdk.get().asFile, "build-tools/$buildTools/dexdump")
+                if (!dexdump.canExecute()) {
+                    throw GradleException("Telemetry check needs `dexdump`, not found at ${dexdump.path}.")
+                }
+                val logging = "Lcom/google/mediapipe/tasks/core/logging"
+                val callSiteClass = "$logging/TasksStatsProtoLogger"
+                var callSiteSeen = false
+                val calls = mutableListOf<String>()
+                ZipFile(apk).use { zip ->
+                    zip.entries().asSequence().filter { it.name.endsWith(".dex") }.forEach { entry ->
+                        val dex = File(temporaryDir, entry.name)
+                        zip.getInputStream(entry).use { input -> dex.outputStream().use { input.copyTo(it) } }
+                        val process = ProcessBuilder(dexdump.path, "-d", dex.path).redirectErrorStream(true).start()
+                        process.inputStream.bufferedReader().useLines { lines ->
+                            lines.forEach { line ->
+                                if (DexInvocationChecker.isClassDefinition(line, callSiteClass)) callSiteSeen = true
+                                if (DexInvocationChecker.isInvocation(line, "$logging/LoggingClient", "logEvent") ||
+                                    DexInvocationChecker.isInvocation(line, "$logging/RemoteLoggingClient", "logEvent")
+                                ) {
+                                    calls += line.trim()
+                                }
+                            }
+                        }
+                        if (process.waitFor() != 0) throw GradleException("dexdump failed on ${entry.name}.")
+                    }
+                }
+                if (!callSiteSeen) {
+                    throw GradleException(
+                        "Telemetry check read nothing for `$checkedVariant`: `$callSiteClass` is not in the dex. " +
+                            "MediaPipe moved its logger, or the check lost its grip on the artefact.",
+                    )
+                }
+                if (calls.isNotEmpty()) {
+                    throw GradleException(
+                        "MediaPipe's usage logger can still send in `$checkedVariant` (${calls.size} call site(s)):\n" +
+                            calls.joinToString("\n") { "  $it" } +
+                            "\n\nThe `-assumenosideeffects` rules for `LoggingClient.logEvent` in " +
+                            "`app/proguard-rules.pro` no longer match.",
+                    )
+                }
+            }
+        }
+
+        // Third guard, and the only one that runs BEFORE R8: every name in
+        // `proguard-rules.pro` must exist on the classpath R8 is about to read.
+        // R8 matches a misspelt or moved name with nothing and says nothing —
+        // four AppFunctions rules and a LiteRT one protected nothing for as long
+        // as they existed. The classes are the variant's own view of what R8
+        // consumes (every scope) plus the SDK boot classpath.
+        val verifyKeepRuleTargets = tasks.register<VerifyKeepRuleTargetsTask>("verify${variantName}KeepRuleTargets") {
+            group = "verification"
+            description = "Fails the release build if a keep rule names a class that is not on the classpath."
+            rulesFile.set(layout.projectDirectory.file("proguard-rules.pro"))
+            bootClasspath.from(androidComponents.sdkComponents.bootClasspath)
+            checkedVariant.set(variant.name)
+            stampFile.set(layout.buildDirectory.file("reports/keep-rule-targets/${variant.name}.txt"))
+        }
+        variant.artifacts.forScope(ScopedArtifacts.Scope.ALL)
+            .use(verifyKeepRuleTargets)
+            .toGet(
+                ScopedArtifact.CLASSES,
+                VerifyKeepRuleTargetsTask::classJars,
+                VerifyKeepRuleTargetsTask::classDirectories,
+            )
+        tasks.matching { it.name == "minify${variantName}WithR8" }.configureEach { dependsOn(verifyKeepRuleTargets) }
+
+        // Stripping with the pinned NDK, or not at all. AGP never downloads an
+        // NDK to strip with: without the pinned one it prints "Unable to strip
+        // the following libraries, packaging them as they are" and succeeds, and
+        // the release then differs from CI's in its native libraries (measured:
+        // 3 of 5). So the release build refuses to start stripping instead.
+        val pinnedNdkVersion = libs.versions.ndk.get()
+        val sdkDirectory = androidComponents.sdkComponents.sdkDirectory
+        val verifyPinnedNdk = tasks.register("verify${variantName}PinnedNdk") {
+            group = "verification"
+            description = "Fails the release build if the pinned NDK that strips native libraries is not installed."
+            val checkedVariant = variant.name
+            doLast {
+                PinnedNdk.problem(sdkDirectory.get().asFile, pinnedNdkVersion)?.let { problem ->
+                    throw GradleException(
+                        "`$checkedVariant` strips its native libraries with NDK $pinnedNdkVersion " +
+                            "(`ndk` in gradle/libs.versions.toml). $problem\n" +
+                            "Install it with: sdkmanager \"ndk;$pinnedNdkVersion\" " +
+                            "(Android Studio: SDK Manager → SDK Tools → Show Package Details → NDK (Side by side)).",
+                    )
+                }
+            }
+        }
+        tasks.matching { it.name == "strip${variantName}DebugSymbols" }.configureEach { dependsOn(verifyPinnedNdk) }
+
         // Both packaging paths, not just the APK: the distribution artefact for
         // Play is the AAB, and a guard that only watches `assemble` would wave
         // through exactly the build that ships.
@@ -2094,6 +2361,63 @@ androidComponents {
         // The dex guard needs a packaged APK, so it rides `assemble` only;
         // the AAB carries the same dex from the same R8 run.
         tasks.matching { it.name == "assemble$variantName" }.configureEach { finalizedBy(verifyInstantiable) }
+        tasks.matching { it.name == "assemble$variantName" }.configureEach { finalizedBy(verifyNoMediaPipeTelemetry) }
+    }
+}
+
+// ─── Merged-manifest guard ───────────────────────────────────────────────────
+// The source manifests are not what ships: the merger folds in every library's
+// own manifest, so a dependency bump can add a permission, an exported component
+// or a `queries` entry without a line of this repository changing — and the
+// privacy policy's permission table and the threat model's list of entry surfaces
+// would both be wrong. Each shipping variant's merged manifest is compared with a
+// hand-edited expectation in `config/merged-manifest/`. Release variants only,
+// because those are what ship; the merge costs seconds and needs no signing or R8.
+androidComponents {
+    onVariants(selector().withBuildType("release")) { variant ->
+        val variantName = variant.name.replaceFirstChar { it.uppercaseChar() }
+        val verifyMergedManifest = tasks.register<VerifyMergedManifestTask>("verify${variantName}MergedManifest") {
+            group = "verification"
+            description = "Fails the build if the merged `${variant.name}` manifest disagrees with its expectation."
+            mergedManifest.set(variant.artifacts.get(SingleArtifact.MERGED_MANIFEST))
+            expectation.set(rootProject.layout.projectDirectory.file("config/merged-manifest/${variant.name}.txt"))
+            checkedVariant.set(variant.name)
+            repositoryRoot.set(rootProject.layout.projectDirectory)
+            stampFile.set(layout.buildDirectory.file("reports/merged-manifest/${variant.name}.txt"))
+        }
+        tasks.named("check") { dependsOn(verifyMergedManifest) }
+    }
+}
+
+// ─── No SLF4J provider in a shipping build ──────────────────────────────────
+// Koog logs through SLF4J, and one of its modules brought `slf4j-simple` in at
+// runtime: every `INFO`+ line logged through SLF4J — among Koog's, a model's
+// reasoning trace and a whole response on one provider's warning — went to
+// logcat, past the redaction the app applies to its own logs. The module is
+// excluded in `configurations.configureEach`; this guard keeps every other
+// provider out too. It reads the Java resources of the variant's runtime
+// classpath before R8 (the variant API's `ScopedArtifact.JAVA_RES` hands a task
+// nothing for the ALL scope, measured on AGP 9.3.1), because R8 turns a
+// resolvable `ServiceLoader` lookup into a constructor call and drops the service
+// file from the APK — the packaged artefact shows no registration even while it
+// ships the provider. In `check`, so a change adding a provider fails there, and ahead of
+// R8, so a release build cannot skip it.
+androidComponents {
+    onVariants(selector().withBuildType("release")) { variant ->
+        val variantName = variant.name.replaceFirstChar { it.uppercaseChar() }
+        val verifyNoSlf4jProvider = tasks.register<VerifyNoSlf4jProviderTask>("verify${variantName}NoSlf4jProvider") {
+            group = "verification"
+            description = "Fails the build if the `${variant.name}` resources register an SLF4J logging provider."
+            resources.from(
+                variant.runtimeConfiguration.incoming.artifactView {
+                    attributes { attribute(Attribute.of("artifactType", String::class.java), "android-java-res") }
+                }.files,
+            )
+            checkedVariant.set(variant.name)
+            stampFile.set(layout.buildDirectory.file("reports/slf4j-provider/${variant.name}.txt"))
+        }
+        tasks.named("check") { dependsOn(verifyNoSlf4jProvider) }
+        tasks.matching { it.name == "minify${variantName}WithR8" }.configureEach { dependsOn(verifyNoSlf4jProvider) }
     }
 }
 
@@ -2174,13 +2498,17 @@ val documentationFiles: FileCollection = files(
 
 // Internal links — a blocking gate. A relative path or an `#anchor` is a claim
 // about this repository, so its verdict is a function of the commit under review
-// and a dead one is a defect the build can refuse.
+// and a dead one is a defect the build can refuse. So is an inline-code span
+// written as a repository path (`domain/…/Foo.kt`).
 val verifyDocLinks by tasks.registering(VerifyDocLinksTask::class) {
     group = "verification"
-    description = "Fails the build if a relative link or an #anchor in the documentation leads nowhere."
+    description = "Fails the build if a relative link, an #anchor or an inline-code repository path in the " +
+        "documentation leads nowhere."
     repositoryRoot.set(rootProject.layout.projectDirectory)
     documents.from(documentationFiles)
     requiredPrefixes.set(documentationRoots)
+    // History names the files of the tree each entry was written against.
+    codePathExemptions.set(listOf("CHANGELOG.md"))
 }
 tasks.named("check") { dependsOn(verifyDocLinks) }
 
@@ -2320,6 +2648,17 @@ committedFileConsumers.forEach { consumer ->
 // this matrix too.
 tasks.withType<Test>().configureEach { mustRunAfter(committedFileGenerators) }
 
+// Robolectric 4.17 sets a `FileDescriptor`'s raw descriptor through
+// `jdk.internal.access.SharedSecrets` while it sets up each test's application.
+// `java.base` does not export that package, so every Robolectric test failed with
+// "Failed to interact with raw FileDescriptor internals" until it is exported to the
+// test JVM (robolectric/robolectric#11434: the maintainers' answer is to open the
+// modules Robolectric uses, not a library change). Only this one package — the
+// upstream build opens a dozen more, for its own javac-based tests.
+tasks.withType<Test>().configureEach {
+    jvmArgs("--add-exports=java.base/jdk.internal.access=ALL-UNNAMED")
+}
+
 // The version number, in every place a human wrote it down. `versionName` below
 // is the single source of truth for the build; the README badge, the topmost
 // changelog heading and the two compare links at the foot of the changelog are
@@ -2337,3 +2676,46 @@ val verifyVersionSources by tasks.registering(VerifyVersionSourcesTask::class) {
     stampFile.set(layout.buildDirectory.file("reports/docs-links/version-sources-verified.txt"))
 }
 tasks.named("check") { dependsOn(verifyVersionSources) }
+
+// What the build executes before any code of this repository runs: the GitHub
+// Actions every workflow calls, and the Gradle distribution the wrapper fetches.
+// Both were referenced by something that can move — a tag, a URL with no checksum
+// — in the same job that holds the release signing key. The guard fails when a pin
+// disappears (a step copied from a README, a `wrapper` run without a checksum); see
+// docs/static-analysis.md § Supply-chain pin guard.
+// The keys dependency verification may trust across a namespace (`regex="true"`):
+// an organisation's own release keys, for that organisation's groups. Any other key
+// is trusted for exactly the groups it signs. Gradle's metadata generator does not
+// draw this line — it folded two Google engineers' personal keys into all of
+// `com.google.*` — so a key added here is a decision, and its owner is written down.
+val dependencyVerificationNamespaceKeys: Map<String, String> = mapOf(
+    "0E225917414670F4442C250DFD533C07C264648F" to "Google Maven signing key (Linux Packages Signing Authority)",
+    "0F06FF86BEEAF4E71866EE5232EE5355A6BC6E42" to "Google Maven signing key (Linux Packages Signing Authority)",
+    "20723A6399BC060154283B37CFAE163B64AC9189" to "JetBrains Compose Team <compose@jetbrains.com>",
+    "33FD4BFD33554634053D73C0C2148900BCD3C2AF" to "JetBrains <download@jetbrains.com>",
+    "6F538074CCEBF35F28AF9B066A0975F8B1127B83" to "Kotlin Release <kt-a@jetbrains.com>",
+    "E7DC75FC24FB3C8DFE8086AD3D5839A2262CBBFB" to "Kotlin Libraries Release <kt-libraries@jetbrains.com>",
+)
+
+// The only artifacts dependency verification may skip (`<trusted-artifacts>`): files
+// an IDE downloads so a reader can navigate, and the build never executes. Keyed by
+// the `<trust>` entry's attributes, sorted by name and joined as `name=value`.
+val dependencyVerificationTrustedArtifacts: Map<String, String> = mapOf(
+    "file=.*-javadoc[.]jar regex=true" to "API docs the IDE attaches; never on a classpath",
+    "file=.*-sources[.]jar regex=true" to "Sources the IDE attaches; never on a classpath",
+    "file=gradle-.*-src[.]zip group=gradle name=gradle regex=true" to
+        "Gradle's source distribution, fetched by Android Studio's sync for build-script navigation",
+)
+
+val verifySupplyChainPins by tasks.registering(VerifySupplyChainPinsTask::class) {
+    group = "verification"
+    description = "Fails the build if an Action or the Gradle distribution is unpinned, or dependency trust widened."
+    repositoryRoot.set(rootProject.layout.projectDirectory)
+    workflowFiles.from(fileTree("$rootDir/.github") { include("**/*.yml", "**/*.yaml") })
+    wrapperProperties.set(file("$rootDir/gradle/wrapper/gradle-wrapper.properties"))
+    verificationMetadata.from("$rootDir/gradle/verification-metadata.xml")
+    namespaceKeys.set(dependencyVerificationNamespaceKeys)
+    allowedTrust.set(dependencyVerificationTrustedArtifacts)
+    stampFile.set(layout.buildDirectory.file("reports/supply-chain/pins-verified.txt"))
+}
+tasks.named("check") { dependsOn(verifySupplyChainPins) }

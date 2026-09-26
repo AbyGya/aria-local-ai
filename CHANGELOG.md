@@ -13,8 +13,461 @@ details.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-26
+
+### Security
+
+- **A saved Hugging Face token is sent only to Hugging Face.** It used to go
+  with any model download while a token was saved, including one from a link
+  pasted for another host. The downloader now attaches it only to an HTTPS
+  request to `huggingface.co`.
+- **Cloud error messages no longer carry API keys.** A provider error can quote
+  the failing request, key included; three paths passed that text on unscrubbed,
+  into a run's error, the console, chat and trigger-journal exports and crash
+  reports. They are scrubbed now, and the pipeline engine and the crash-reporting
+  log scrub again, so a path added later is covered too.
+- **Model output no longer reaches the device log.** A logging library that
+  came with the cloud-model client wrote its messages to the system log
+  (logcat, readable over USB debugging and included in bug reports), and some
+  of them quoted a model's answer or reasoning. It is no longer part of the app.
+- **Crash reports no longer carry file names or error text.** With crash
+  reporting on, a logged error was sent with its message and the values written
+  into it: a workspace file's path, the arguments of a failed tool call, even the
+  content of a file being written. A report now carries the error's type, where
+  in the code it happened, and the fixed text of the log line.
+- **Wikipedia search can only reach Wikipedia.** The language code chosen for a
+  search is checked before the request is built, so it can no longer point the
+  request at another server.
+- **An approval covers only the call it was given for.** When a run that waited
+  in the background resumes, your answer is applied only if the call is the one
+  you answered — the same arguments at the same risk. If it has changed, you are
+  asked again, even if **Approve tool calls** is set to *Never*.
+- **Approving from a notification needs the whole call on screen.** A call whose
+  arguments are longer than a notification can show is cut there with a note and
+  approved in the chat, where every argument is visible. Deny still works from
+  the notification.
+- **A share or the Quick Settings tile no longer runs a pipeline you did not bind.**
+  If the pipeline they were bound to no longer existed — after *Erase data*, for
+  example — they ran the default pipeline while Settings said "Not set". They now
+  do nothing until you bind one.
+- **Deleting a pipeline switches its triggers off at once**, and importing a file
+  under a deleted pipeline's id asks first. The id stayed free while chats,
+  triggers and calling pipelines still named it, so an import could quietly
+  become what they ran. The import now lists them, and importing as a copy — the
+  default — leaves them alone.
+- **Switching `search_tool` off stops the lookup other apps can ask for too.**
+  The Wikipedia search published to other apps on Android 16 ignored the tool's
+  switch on the Tools screen.
+- **Another app can no longer crash Knotwork through the share sheet.** A share
+  carrying data the app cannot read is now treated as an empty share, and a shared
+  image larger than 64 MB is refused instead of being read into memory.
+- **A file name the phone cannot store is refused.** A name holding half of a
+  surrogate pair (a broken emoji, say) could stop the Files screen and the file
+  tools from listing anything; it is refused now, and a name like that left by an
+  earlier version no longer breaks the listing.
+- **Prompts of scheduled and background runs are encrypted on the phone.** A
+  scheduled task's instruction, a trigger's prompt and a request from another app
+  were kept by Android's background scheduler in its own unencrypted store, and
+  *Erase data* did not reach it — a recurring task fired again after the wipe.
+  The prompts now live in the encrypted database, and *Erase data* cancels
+  every queued run. Tasks scheduled before this release move over the next time
+  they run.
+- **The memory library no longer reports usage to Google.** The on-device
+  library behind memory embeddings (MediaPipe) sent usage counts, the phone's
+  model, build fingerprint, country and carrier to Google in the `full` build,
+  without asking. Release builds now remove that call, and each release build is
+  checked for it.
+- **A download can no longer be redirected to an unencrypted public address.**
+  The rule that public hosts need https applied to the first request of a model
+  download or a Hugging Face search, not to a redirect that followed.
+- **`http_request` has a deadline and stops with the run.** A response that kept
+  trickling held the run, *Stop* and every chat queued behind it; one call now
+  ends after 60 seconds, and stopping the run ends it at once. The tool also
+  refuses a `Host` header (it would pick another site behind an allowed address)
+  and finds a saved key in a header name or a percent-encoded address or body.
+- **A developer build no longer starts crash reporting.** Turning the switch on
+  in a debug build turned Crashlytics on there as well; the switch now only
+  records consent, and release builds act on it.
+- **A denied tool call stays denied.** If the approval setting or the tool's
+  risk level was relaxed while a background run waited for an answer, a
+  **Deny** given afterwards was recorded but not applied, and the tool ran. The
+  recorded answer now decides, whatever the settings say when the run resumes.
+- **A destructive tool can no longer be approved from a notification.** While a
+  run was still waiting live, its approval notification offered one-tap
+  **Approve** for every tool. For a destructive one it now offers **Deny** and
+  **Review in chat**, as the notification of a longer wait already did, so
+  approving still takes the typed confirmation in the chat.
+- **An approval answers only the request it was shown for.** When two runs
+  waited in the same chat — a background run parked on one tool while another
+  run asked about a second — an answer from a notification or the chat card
+  could settle the other request. Each request now has an identity of its own
+  that its card and notification answer with, and an answer to anything else
+  settles nothing. Each waiting request also keeps its own notification, and a
+  notification is removed when its run stops without an answer.
+- **"Never" no longer quiets destructive tools.** With **Approve tool calls**
+  set to **Never**, a destructive call — deleting a file, an `http_request`
+  `POST`/`PUT`/`DELETE` — used to run without asking, although the app, its
+  documentation and the tool's own description said it always asks. It now
+  stops for approval under every setting; **Block destructive tools** still
+  refuses it outright. Read-only and sensitive calls run under **Never** as
+  before, and the setting's help text and the security documents now say so.
+- **An MCP tool call runs on the server it was approved for.** When two servers
+  offered the same tool name, the risk level could come from one server while
+  the call ran on the other. Now one server serves each name — the first listed
+  that has the tool switched on — and the risk, the approval and the call all
+  come from it. A call that fails is no longer retried on another server, and a
+  call is stopped if the serving server changes after the approval check.
+- **A server tool can no longer take a built-in tool's name.** A tool on your
+  device always wins its name; a server tool with the same name (or the same
+  name as a tool on a server listed above) is not offered to the agent, and the
+  Tools screen says so under it.
+- **MCP servers are limited in how much text they can send.** A tool result, or
+  an error message sent instead, is cut at the same size limit as a web
+  response, and a server's tool list is limited in size, tool count and
+  description length. The **Largest web response** setting is now **Largest
+  tool response** and covers both.
+- **Tool results no longer reach long-term memory.** Automatic memory
+  extraction read the whole recent chat, tool results included, so text a web
+  page or an MCP server returned could be saved as something you said. It now
+  reads only your messages and the assistant's replies — and not a reply that
+  is a tool's result passed on unchanged, which an Output node with no
+  instruction does behind a Tool node. The transcripts the app builds for the
+  model also lay out a message of several lines so that it cannot pass for a
+  separate turn.
+- **An imported memory file can no longer pin its entries or date them in the
+  future.** A pinned entry is recalled whatever the question, a future-dated one
+  stays first among recent memories, and both escaped compaction. Imported
+  entries now arrive unpinned — the import dialog says how
+  many the file had pinned — and a date in the future becomes the date of the
+  import.
+- **Replacing a pipeline on import says what it replaces.** When an imported
+  file had the same identity as a pipeline in the library, the confirmation
+  named the file's own name — so it could name a pipeline the library did not
+  have — and did not say that everything bound to that pipeline would run the
+  file from then on. It now names the pipeline already in the library and lists
+  what runs it: the default pipeline, the share target, the tile, requests from
+  other apps, automation triggers, chats and calling pipelines. **Import as
+  copy** is now the suggested choice. Bundles get the same list.
+- **A node's settings sheet shows the settings that run.** A pipeline file keeps
+  each node's settings twice, one copy for the run and one for the editor, and
+  the sheet showed the editor's copy. An imported file could fill it with a
+  different tool, prompt or confirmation switch from the ones the run used. The
+  sheet now shows the run's copy, for pipelines imported before this change too.
+- **Import errors quote the file in one short line.** An error quoted the
+  offending value as written, line breaks included, so a file could add
+  sentences of its own to the message — and on a phone, a file that was not
+  valid JSON was quoted in full. Each quoted value is now one line of at most
+  60 characters. The embedding provider named in the memory import dialog gets
+  the same treatment.
+- **Imported names stay short.** A pipeline's name and its nodes' labels are
+  kept to one line of at most 60 characters, the limit the app already applied
+  to names you type.
+- **An imported pipeline's starter prompts name only tools it calls.** The
+  `uses · …` line under a starter prompt keeps a tool only if one of the
+  pipeline's Tool nodes calls it, and a pipeline shows at most six starter
+  prompts.
+- **The workspace limits count folders and small files.** A folder cost nothing
+  against the size limit, stayed behind when its last file was deleted, and could
+  not be removed from the app; tiny files were nearly free too. Deleting a file
+  now removes the folders it empties, leftover empty folders are cleared, and the
+  workspace holds at most 10,000 files and folders.
+- **A file search can no longer stall the agent.** `find_files` turned its
+  pattern into a check whose running time could grow without bound, and nothing
+  could interrupt it. It now takes time in proportion to the pattern and the
+  path, and patterns are limited to 256 characters.
+- **A file name cannot add lines to the agent's file list.** A name with a line
+  break — such as one supplied by the app a file was imported from — could show
+  up as extra entries. Imports replace control characters with `_`, the agent's
+  own writes refuse them, and the list shows any older such name escaped.
+- **Unusable file paths get an error instead of an exception.** A path with a
+  NUL byte or a name too long for the filesystem is now refused with a clear
+  message to the agent.
+- **A photo taken in a chat no longer stays in the app's cache.** The camera
+  saves the full-size original — the only copy that keeps the photo's location
+  data — to a temporary file, and nothing deleted it. It is now deleted as soon
+  as the smaller copy is attached, or when the capture is cancelled.
+- **A shared image is read only from the app that shares it.** The share target
+  opened whatever location a share named with the app's own access, including
+  files inside the app's private storage. It now opens only content another app
+  provides.
+- **A shared image gets the same check as one sent from the chat.** Shared into
+  a pipeline that starts with a cloud step, or whose model cannot read images,
+  the picture was dropped without a word and the run went ahead, sometimes
+  answering about an image it never received. Such a share now runs nothing and
+  says why.
+- **A shared workspace file leaves no copy behind.** Sharing from the Files
+  screen makes a temporary copy for the receiving app. Deleting the file now
+  deletes its copies; any other copy is removed once it is more than an hour
+  old, by the next share or the daily clean-up. Sharing another file no longer
+  deletes a copy the receiving app may still be reading.
+- **Temporary files are cleared daily.** The daily maintenance pass also removes
+  leftover temporary files older than an hour: camera captures, voice clips left
+  by a crash, share copies and journal exports.
+- **MCP custom headers are stored encrypted.** The header rows of an MCP server
+  — whose hints suggest `Authorization: Bearer …` — were saved in plain
+  settings, unlike the server's auth. They are now kept encrypted with it, and
+  headers saved by earlier versions are moved on first start.
+- **Nothing the app stores goes into Android backup or to a new device.**
+  Attachments and workspace files were included in cloud backup and in
+  device-to-device transfer. Now nothing is: the rest of the app's data only
+  works on the device it was created on, so a new phone starts empty instead of
+  on the "data can't be unlocked" screen.
+- **Erase data on the recovery screen also deletes workspace files and
+  attachments.** It used to delete only the database while its button said
+  *Erase everything*. The dialog now lists what it deletes and says that
+  settings and saved keys are kept.
+- **A damaged MCP setting can no longer put a credential in a crash report.**
+  Reading a corrupted MCP entry logged the parser's error, whose text on Android
+  includes the whole entry. The log now names only the kind of error.
+- **Other apps can no longer start share runs without limit.** Any app can start
+  the share target directly, not only from the share sheet. At most 30 shares an
+  hour now start a run; past that a share is refused with a notice and nothing
+  is stored. The security documentation now names every surface another app can
+  reach without a permission.
+- **External automation sends nothing while it is switched off.** A malformed
+  request sent while the feature was off — its default — was still answered,
+  with a broadcast to the package and action the request named. Nothing is sent
+  now while it is off, including the final report of a run accepted before it
+  was switched off.
+- **External automation bounds the caller's text.** The request id may be at
+  most 128 characters and the callback's action and package at most 256; a
+  longer value is refused as `VALUE_TOO_LONG`. The request journal keeps at most
+  256 characters of any value, so refused requests cannot fill the device's
+  storage.
+- **The release build runs only what it has pinned.** Every GitHub Action the
+  workflows use is pinned to an exact commit, the Gradle download to its
+  checksum, and every dependency is checked against its publisher's signature or
+  a recorded checksum before it is used. The build also stopped running on a JDK
+  that Gradle downloaded without a checksum.
+- **A library can no longer add a permission unnoticed.** The build compares the
+  permissions, exported components and package-visibility entries of each
+  release with a recorded list and fails on any difference.
+- **Changes are scanned for secrets.** Every commit under review is checked for
+  keys and tokens before it can merge.
+- **The release build checks more of what it ships.** Every class a code-shrinking
+  keep rule names must now exist; five did not, and protected nothing. The F-Droid
+  build fails if a Firebase, Play-services or Google data-transport component
+  returns to its manifest, and release builds no longer see the package the
+  end-to-end test installs.
+- **Release APKs are signed with APK Signature Scheme v3 as well as v2.** v3 is
+  the scheme a change of signing key is expressed in.
+- **The protobuf library MediaPipe brings in is raised to 4.27.5**, past a
+  denial-of-service flaw (CVE-2024-7254). Nothing in the app passed it untrusted
+  data; the update closes the exposure regardless.
+- **Wikipedia lookups no longer name your phone.** The search tool sent
+  Android's default user agent, which carries the phone model and the exact
+  Android build. It now sends the app's name and version.
+- **The report dialog says when a report reaches GitHub.** **Open issue** puts
+  the report in the link, so GitHub receives it as soon as the page opens, not
+  when the issue is submitted. The dialog, the guide and the privacy policy now
+  say so; **Copy report** still sends nothing.
+- **The app no longer contains a library's telemetry exporters.** Koog, the
+  library behind the cloud providers, ships exporters for Langfuse, W&B and
+  Datadog. The app never switched them on; they are now left out of the build
+  entirely, which also makes the APK about 0.4 MB smaller.
+- **An imported chat is treated as someone else's words.** A chat file decides
+  who said what and when. Its messages were read for long-term memory as things
+  you had said, one dated in the future was what **Retry** re-ran, and its
+  system rows looked like the app's own notices, including on the Monitoring
+  screen. The import now keeps only the conversation, marks it as imported,
+  never dates it after the import, and writes the whole file or nothing;
+  imported messages are never read for memory or re-run.
+- **A pipeline file cannot leave a node's inputs to chance.** An *Input data*
+  switch a file left out was read as on, so a cloud node could receive memory
+  and tool results the editors showed as off. It now takes the node type's
+  usual setting, and a switch that is neither on nor off, or a provider name
+  the app does not know, refuses the file. "AUTO" now counts as automatic
+  provider choice in any letter case, as the node sheet already showed it.
+- **A memory or a tool description can no longer add lines to a prompt.** The
+  `$MEMORY_SUMMARY` and `$TOOLS` lists, and the tool lists a tool or skill node
+  chooses from, now indent every further line of an entry, as the context
+  blocks already did — so an imported memory or an MCP server's description
+  cannot write a line that reads as the app's own.
+- **Importing a memory file can no longer stop memory from saving.** A file
+  could give an entry an id so large that every later memory write failed; an
+  id no export of the app could hold is now ignored.
+- **Import dialogs quote a file on one line.** The list of settings a newer
+  file carries, a prompt pack's name and a pipeline cycle error could each put
+  the file's own line breaks and text-direction marks on screen. A pipeline
+  file whose id is not one line of at most 128 characters is refused.
+- **Tool results are cut to fit the on-device model.** The response limit
+  (1 MB by default) bounds what the app keeps of a web page or MCP result, not
+  what a local model can read. A node on the on-device model now gets each tool
+  result cut to the **Single read budget**, with a note saying how much was
+  left out; a node on a cloud provider still gets it whole.
+- **An imported pipeline's branches are drawn where the run takes them.** A
+  router edge whose label named none of the router's classes was drawn from the
+  first class's port and could still win most replies; it now has a port of its
+  own. An If, Queue or Evaluation edge labelled in another letter case (`false`)
+  was drawn from the wrong port; it is now saved as its port spells it, and a
+  label that names no branch of the node refuses the file. The browser editor
+  reads branch labels the same way.
+- **Keyboards are told when you type a secret.** The API-key, Hugging Face
+  token and MCP credential fields, and the value of an MCP custom header, now
+  ask the keyboard for a password input, so it does not suggest or learn what
+  you type there. The MCP credential and header values are also masked on
+  screen.
+
+### Changed
+
+- **The privacy policy says more exactly what can leave the phone.** A router,
+  condition or other node whose engine is set to a cloud provider is named as a
+  cloud path, not only a Cloud node; a crash report's random installation
+  identifier is listed; and the trigger journal export is described as holding a
+  failed run's error message. The FOSS build is described as having no crash
+  reporting or analytics, rather than no Firebase code at all, and attachments
+  as never sent to a cloud provider, which the app already guaranteed. The
+  threat model now covers imported pipelines and the browser editor.
+- **The app opens without loading the on-device model.** The start screen no
+  longer waits for the model; the first message loads it, as it already did
+  whenever the model had been unloaded after idling. Until a message is sent,
+  the model's memory stays free.
+- **Dependencies updated in one pass**, among them the on-device inference
+  engine (LiteRT-LM 0.17), the encrypted-database driver (SQLCipher 4.19), the
+  cloud-model client library (Koog 1.3) and the build tools (Gradle 9.8,
+  Android Gradle Plugin 9.4, Kotlin 2.4.20). The inference engine and the
+  database driver carry native code that only a phone exercises, so both are
+  checked on a device before this release.
+- **The search Knotwork publishes to other apps moves to the current
+  AppFunctions library, on Android 16 and later, under a new id.** The newer
+  library declares an app's functions in one service instead of a separate
+  service library; the move also drops the path it offered through a
+  manufacturer's extension on Android 14 and 15. The function's id is now
+  `` app.knotwork.android.`data`.tools.local.appfunctions.AgentAppFunctionService#search ``
+  (was `…SearchAppFunction#invoke`), and it carries a description for the agent
+  that calls it. Only a privileged system agent can call it; nothing changes
+  inside the app.
+
 ### Fixed
 
+- **A decomposition node without a subtask limit keeps 5.** Its sheet showed 5
+  while the run kept every subtask the model produced.
+- **Stopping a chat's queued message no longer leaves the chat looking busy.**
+  Stopping a message that was still waiting — right after the chat's previous
+  answer had finished — dropped the message but left the chat showing it was
+  working, until something else ran there.
+- **Messages at the bottom of the screen look the same everywhere and stay out
+  of the way.** They came in three styles and four positions: on every settings
+  screen and in the pipeline library they appeared at the top-left, over the
+  title bar; elsewhere they covered the create button, the pipeline editor's
+  status bar or the chat's input, or sat under the system navigation bar. They
+  now share one style and sit above whatever is at the bottom of the screen.
+- **The Models screen shows download and benchmark errors.** It prepared those
+  messages but had nowhere to show them, so they never appeared.
+- **Tapping the message field no longer opens a link in the chat behind it.**
+  The field took taps only across one line of text, and the bar around it —
+  the console strip's margin, a run notice — took none; a tap there fell
+  through to the message scrolled underneath. A tap anywhere on the field now
+  focuses it, and the rest of the bar keeps its taps.
+- **A new chat's suggestions are no longer cut off.** On a short screen, with
+  the keyboard open, in landscape or at a large font size, the last suggestion
+  cards were clipped; the list now scrolls.
+- **The recovery screen appears when the database cannot be unlocked.** When
+  the database's key was lost, the app closed at every start instead of
+  offering Retry and Erase data: a background step that re-registers
+  automation triggers read the locked database and crashed the app before the
+  screen could show. Each start-up step now fails on its own.
+- **The model screens name the one format that works.** The custom model link
+  and the onboarding step invited `.task` and `.gguf` files as well as
+  `.litertlm`; files in those formats downloaded and then never loaded. Both
+  screens and the user guide now say `.litertlm`, and a link to any other file
+  is refused with a message before anything downloads. A link ending in
+  `?download=true` is saved under the model's own name instead of carrying the
+  query into it.
+- **Downloaded models come back after Erase data.** Erasing a database that can
+  no longer be unlocked keeps the downloaded models on the device, but the app
+  forgot them and listed none. They are listed again under Models the next time
+  the app starts, so re-downloading gigabytes is never the price of recovering.
+- **A scheduled pipeline that runs other pipelines no longer uses up the hourly
+  limit early.** The agent may schedule at most 12 runs an hour, and each
+  pipeline step inside a scheduled run counted as another run of its own.
+- **One waiting notification no longer replaces or clears another.** An
+  approval, a question and a paused run could land on the same notification
+  slot: a new approval replaced the notification of a paused run, and answering
+  one removed the other — the paused run's only way back. Each kind now has
+  slots of its own. A notification left in the shade by an earlier version is
+  removed when its run is answered.
+- **One commit builds the same app on any machine.** The commit identifier in
+  About now always has eight characters, whatever the clone, and native libraries
+  are stripped by a pinned NDK: a release build without it fails instead of
+  shipping them unstripped.
+- **The privacy policy no longer presents "Execute app functions" as in use.**
+  Android grants that permission only to system apps, so on a normal install
+  nothing uses it.
+- **The privacy indicator counts every connection the app opens.** The More
+  tab's footer read "no network calls" while a Wikipedia search, an
+  `http_request`, a delegated task, a network embedding model, or Hugging Face
+  browsing and downloads were running — and showed a long cloud answer or
+  download as finished a minute after it started. All of them count now, for as
+  long as they run, and the indicator reads "network call just now" rather than
+  "cloud enabled".
+- **Memory no longer waits fifteen minutes on a silent embedding provider.**
+  With OpenAI or Ollama as the embedding model, memory writes and searches used
+  the client library's 900-second defaults; they now use the chat clients'
+  deadlines.
+- **The in-app FAQ no longer says the automation callback carries a run's
+  output.** It carries the status only, as it always has.
+- **Rotating the phone with the camera open no longer loses the photo.** The
+  chat forgot which photo it was waiting for when the screen was recreated.
+- **A Skill step's "Always ask before this call" works.** A pipeline could carry
+  the switch on a Skill step, but only Tool steps honoured it. Skill steps now
+  ask before every tool call the skill makes, and the switch is on their
+  configuration sheet in the app and in the browser editor. The browser editor
+  also left the switch out of the part of an exported file the app runs from, so
+  a Tool step set to always ask in the browser showed the switch on in the app
+  but added no confirmation; it now writes it there, and keeps it when it opens
+  a file that carries it only in that part.
+- **Bundled pipelines apply the limits their sheets show.** The planning steps
+  of the full agent and the multi-step research pipeline showed a limit of 5 or
+  10 sub-tasks but kept every sub-task the model produced; they now keep at most
+  that many. Four routers showed a fallback route the run did not record; it is
+  recorded now, and where a run goes is unchanged.
+- **The browser editor exports every setting the app runs from.** A router's
+  fallback class, a planner's sub-task limit and a clarification step's quick
+  replies were kept only in the editor's own copy of the node, not in the part of
+  the file the app runs. They now travel in both.
+- **The browser editor keeps a queue's "Stop on first error" and a condition's
+  image check.** Unticking "Stop on first error" in the browser did not reach the
+  app, which still stopped at the first failed item. A condition set to branch
+  on an attached image lost the setting when its file went through the browser,
+  which had no control for it; now it has one. The browser also shows each node
+  from the part of the file the app runs, as the app does, so a file reads the
+  same in both. Files saved by earlier versions of the browser editor keep their
+  queue, router-fallback, sub-task-limit and quick-reply settings: the editor
+  reads them from where those versions stored them and saves them to both parts.
+- **The browser editor reads a pipeline file the way the app does.**
+  - A node's *Input data* switches that a file left out, or set to `0` or
+    `null`, showed as off in the browser; the app sends that data.
+  - A provider name in another letter case, or `gemini`, showed as on-device or
+    Auto; the app calls that provider.
+  - An Ollama node saved in the browser came back as DeepSeek.
+  - A tool the browser has no entry for, such as one from an MCP server, showed
+    as Auto, and saving the node reset it.
+  - A saved preset reusing a bundled preset's id replaced that sub-pipeline in
+    later bundle exports.
+
+  Each of these now matches the app.
+- **Saving right after an import no longer reuses the file's node ids.** An
+  import stores the pipeline under fresh node ids, but the editor kept the
+  file's ones, so the next Save wrote them back — and two imported files that
+  numbered their nodes the same way could take each other's nodes. The editor
+  now continues from the pipeline as stored.
+- **Two nodes can no longer share an id in a pipeline file.** The import
+  accepted them, checked the graph as if they were one node, and kept only one
+  when saving. Such a file is now refused with the id named.
+- **A very long pipeline no longer crashes the app.** The check for loops in a
+  pipeline could run out of stack on a chain of tens of thousands of nodes.
+- **Files too large to import get a message instead of a crash.** A pipeline or
+  bundle file over 8 MB is not read. A memory file is refused when it holds more
+  than 20,000 entries — the most memory can keep — or is larger than a quarter
+  of the memory the app may use.
+- **The guide named the wrong confirmation word.** It said a destructive tool
+  call is confirmed by typing the tool's name; the field accepts **yes**.
+- **The Wikipedia search tests no longer reach the internet.** Two of them called
+  the live API, which refuses the test environment's user agent, so they passed
+  without checking a real answer. They now run against a local server, and the
+  replies they check — an article, no match, an empty search, a refusal — are
+  shaped like the live ones.
 - **The roadmap described work that had already finished, and the coverage
   baseline had two wrong numbers.** The roadmap said configuration fields were
   shown and stored while nothing read them, with the work "listed in the
@@ -22,6 +475,11 @@ details.
   has been wired up or removed. Two rows of `docs/coverage-baseline.md` were
   re-measured and had drifted in opposite directions: one package had closed its
   gap unaided, another had fallen by growing faster than its tests.
+- **Contributor documentation no longer points at files that do not exist.** The
+  rule for parsing tool arguments named a parser that was never written, and the
+  guide to adding a cloud provider named a settings screen that has since been
+  split. The documentation check now reads file paths written as code, not only
+  links, so a path that stops existing fails the build.
 
 ## [0.10.1] - 2026-09-20
 
@@ -5862,7 +6320,8 @@ that produced the initial 0.1.0 snapshot.
 - **Master key**: `EncryptedSharedPreferences` is rooted in the Android
   Keystore, so the master key is hardware-backed where available.
 
-[Unreleased]: https://github.com/alexeyw/knotwork/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/alexeyw/knotwork/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/alexeyw/knotwork/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/alexeyw/knotwork/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/alexeyw/knotwork/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/alexeyw/knotwork/compare/v0.8.0...v0.9.0

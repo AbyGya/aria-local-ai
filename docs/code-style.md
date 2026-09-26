@@ -57,6 +57,12 @@ For the broader layering rationale, see
   Composables.
 - Mark preview-only Composables with `@Preview` and keep them in dedicated
   `*Preview.kt` files, separate from the production Composables they render.
+- Snackbars render through the design system's `KnotworkSnackbarHost` only:
+  in a `Scaffold`'s `snackbarHost` slot, which lifts it above the bottom bar
+  and the floating action button, or bottom-centre of a container already
+  clear of the system bars. A `SnackbarHostState` a screen shows messages
+  into is rendered by a host in the same file. `SnackbarHostGuardTest` fails
+  a raw Material3 host, an unrendered state and an unplaced host.
 
 ## Coroutines & Flow
 
@@ -90,6 +96,30 @@ For the broader layering rationale, see
   lambdas (e.g. `forEach`), which reviewers must still check manually.
   Cleanup that must also run on the cancellation path belongs in `finally`
   (with `withContext(NonCancellable)` if it suspends).
+
+## Regular expressions
+
+- A regex pattern is a **string literal** in the source. Runtime text goes into
+  it only through `Regex.escape`, which adds characters, never quantifiers.
+  `java.util.regex` backtracks: a pattern shaped by input can take time
+  exponential in its length, and the match cannot be stopped — it never
+  suspends, so a coroutine timeout does not fire.
+- To match input against a pattern that itself comes from the model or the user
+  (a glob, a filter), use a matcher that cannot backtrack, as `WorkspaceGlob`
+  does. `RegexConstructionKonsistTest` fails a `Regex(…)`, `Pattern.compile(…)`
+  or `.toRegex()` built any other way.
+
+## Logging
+
+- A `WARN`-or-above Timber message is a **string literal without templates**,
+  and values go in as format arguments:
+  `Timber.w(e, "import failed for %s", name)`. With crash reporting on, those
+  records are sent as non-fatal reports, and a report carries the literal, the
+  error's type and its stack frames — never the arguments and never an error's
+  own message, which is where paths, file contents and tool arguments travel.
+  A value baked into the literal (`"… $path"`), or a message held in a
+  variable, would be sent. `TimberMessageTemplateKonsistTest` fails any other
+  shape.
 
 ## Dependency injection (Hilt)
 

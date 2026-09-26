@@ -13,7 +13,10 @@ import app.knotwork.android.data.local.ApiKeyManager
 import app.knotwork.android.data.local.AttachmentStoreImpl
 import app.knotwork.android.data.local.AudioCaptureStoreImpl
 import app.knotwork.android.data.local.DatabaseResetServiceImpl
+import app.knotwork.android.data.local.DownloadedModelFilesImpl
+import app.knotwork.android.data.local.ImageCaptureStoreImpl
 import app.knotwork.android.data.local.SettingsManager
+import app.knotwork.android.data.local.TransientCacheSweeperImpl
 import app.knotwork.android.data.local.crypto.AeadCipher
 import app.knotwork.android.data.local.crypto.AndroidKeystoreAeadCipher
 import app.knotwork.android.data.mcp.KoogMcpClientFactory
@@ -21,6 +24,7 @@ import app.knotwork.android.data.mcp.McpClientFactory
 import app.knotwork.android.data.network.AndroidModelDownloadManager
 import app.knotwork.android.data.repositories.AssetBundledDocumentationRepository
 import app.knotwork.android.data.repositories.AssetBundledSkillSource
+import app.knotwork.android.data.repositories.BackgroundPromptRepositoryImpl
 import app.knotwork.android.data.repositories.BundledSkillSource
 import app.knotwork.android.data.repositories.ChatRepositoryImpl
 import app.knotwork.android.data.repositories.ClarificationRepositoryImpl
@@ -42,6 +46,7 @@ import app.knotwork.android.data.repositories.PipelineRunRepositoryImpl
 import app.knotwork.android.data.repositories.PowerStateRepositoryImpl
 import app.knotwork.android.data.repositories.PromptRepositoryImpl
 import app.knotwork.android.data.repositories.RunTraceRepositoryImpl
+import app.knotwork.android.data.repositories.ShareAdmissionRepositoryImpl
 import app.knotwork.android.data.repositories.SkillRepositoryImpl
 import app.knotwork.android.data.repositories.ToolRepositoryImpl
 import app.knotwork.android.data.repositories.TriggerJournalRepositoryImpl
@@ -54,6 +59,7 @@ import app.knotwork.android.domain.engine.LlmInferenceEngine
 import app.knotwork.android.domain.engine.TaskQueueManager
 import app.knotwork.android.domain.engine.TextEmbeddingEngine
 import app.knotwork.android.domain.repositories.ApiKeyRepository
+import app.knotwork.android.domain.repositories.BackgroundPromptRepository
 import app.knotwork.android.domain.repositories.BundledDocumentationRepository
 import app.knotwork.android.domain.repositories.ChatRepository
 import app.knotwork.android.domain.repositories.ClarificationRepository
@@ -77,6 +83,7 @@ import app.knotwork.android.domain.repositories.PromptPresetRepository
 import app.knotwork.android.domain.repositories.PromptRepository
 import app.knotwork.android.domain.repositories.RunTraceRepository
 import app.knotwork.android.domain.repositories.SettingsRepository
+import app.knotwork.android.domain.repositories.ShareAdmissionRepository
 import app.knotwork.android.domain.repositories.SkillRepository
 import app.knotwork.android.domain.repositories.ToolRepository
 import app.knotwork.android.domain.repositories.TriggerJournalRepository
@@ -87,8 +94,11 @@ import app.knotwork.android.domain.services.AttachmentStore
 import app.knotwork.android.domain.services.AudioCaptureStore
 import app.knotwork.android.domain.services.AudioRecorder
 import app.knotwork.android.domain.services.DatabaseResetService
+import app.knotwork.android.domain.services.DownloadedModelFiles
+import app.knotwork.android.domain.services.ImageCaptureStore
 import app.knotwork.android.domain.services.MemoryReembedScheduler
 import app.knotwork.android.domain.services.NativeMemorySampler
+import app.knotwork.android.domain.services.TransientCacheSweeper
 import app.knotwork.android.domain.services.TriggerScheduler
 import dagger.Binds
 import dagger.Module
@@ -233,6 +243,15 @@ abstract class DataModule {
     ): PendingInteractionRepository
 
     /**
+     * Binds the [BackgroundPromptRepositoryImpl] implementation to the
+     * [BackgroundPromptRepository] interface — the encrypted home of the prompts
+     * of queued background runs.
+     */
+    @Binds
+    @Singleton
+    abstract fun bindBackgroundPromptRepository(repository: BackgroundPromptRepositoryImpl): BackgroundPromptRepository
+
+    /**
      * Binds the [RunTraceRepositoryImpl] implementation to the
      * [RunTraceRepository] interface backing the buffered persistent
      * pipeline-run trace.
@@ -314,8 +333,8 @@ abstract class DataModule {
 
     /**
      * Binds [NetworkActivityTrackerImpl] to [NetworkActivityTracker]. Records every outbound
-     * cloud-LLM and MCP call so the More tab can render the "no network calls in last N m"
-     * privacy indicator.
+     * call the app opens itself — cloud models, embeddings, MCP, network tools, Hugging Face —
+     * so the More tab can render the "no network calls in last N m" privacy indicator.
      */
     @Binds
     @Singleton
@@ -399,6 +418,17 @@ abstract class DataModule {
     ): ExternalAutomationJournalRepository
 
     /**
+     * Binds [ShareAdmissionRepositoryImpl] to [ShareAdmissionRepository] — the
+     * ledger the share target's rate ceiling counts, kept in the preferences store.
+     *
+     * @param repository The DataStore-backed implementation.
+     * @return The bound repository interface.
+     */
+    @Binds
+    @Singleton
+    abstract fun bindShareAdmissionRepository(repository: ShareAdmissionRepositoryImpl): ShareAdmissionRepository
+
+    /**
      * Binds the `WorkManager`-backed [WorkManagerTriggerScheduler] to the
      * domain-level [TriggerScheduler] port that registers each active trigger's
      * constraint-gated background watch.
@@ -457,6 +487,14 @@ abstract class DataModule {
     abstract fun bindAttachmentStore(store: AttachmentStoreImpl): AttachmentStore
 
     /**
+     * Binds [DownloadedModelFilesImpl] to [DownloadedModelFiles] — the read-only
+     * listing of model files in the downloads directory, used to register again
+     * the models a database reset forgot.
+     */
+    @Binds
+    abstract fun bindDownloadedModelFiles(files: DownloadedModelFilesImpl): DownloadedModelFiles
+
+    /**
      * Binds [AudioCaptureStoreImpl] to [AudioCaptureStore] — the ephemeral
      * voice-input clip store under `cacheDir/audio/`. Singleton so recorder and
      * transcription callers share one view of the cache directory.
@@ -464,6 +502,22 @@ abstract class DataModule {
     @Binds
     @Singleton
     abstract fun bindAudioCaptureStore(store: AudioCaptureStoreImpl): AudioCaptureStore
+
+    /**
+     * Binds [ImageCaptureStoreImpl] to [ImageCaptureStore] — the camera-capture
+     * files under `cacheDir/images/`, read once and deleted on ingest.
+     */
+    @Binds
+    @Singleton
+    abstract fun bindImageCaptureStore(store: ImageCaptureStoreImpl): ImageCaptureStore
+
+    /**
+     * Binds [TransientCacheSweeperImpl] to [TransientCacheSweeper] — the daily
+     * backstop over every handoff directory in the cache.
+     */
+    @Binds
+    @Singleton
+    abstract fun bindTransientCacheSweeper(sweeper: TransientCacheSweeperImpl): TransientCacheSweeper
 
     /**
      * Binds [AudioRecorderImpl] to [AudioRecorder] — the platform-`AudioRecord`

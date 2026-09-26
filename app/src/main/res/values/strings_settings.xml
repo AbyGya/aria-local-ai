@@ -31,7 +31,7 @@
     <string name="settings_row_workspace_max_file_size_title">Largest file</string>
     <string name="settings_row_workspace_max_total_title">Workspace size limit</string>
     <string name="settings_row_workspace_read_budget_title">Single read budget</string>
-    <string name="settings_row_http_tool_max_response_title">Largest web response</string>
+    <string name="settings_row_http_tool_max_response_title">Largest tool response</string>
     <string name="settings_pipeline_nesting_depth_title">Max nesting depth</string>
     <string name="settings_pipeline_structured_repairs_title">Structured-output repairs</string>
     <string name="settings_memory_summary_limit_title">Memory summary size</string>
@@ -120,10 +120,12 @@
     <string name="settings_memory_import_replace">Replace all</string>
     <string name="settings_memory_import_cancel">Cancel</string>
     <string name="settings_memory_import_schema_warning">This file was written by a different app version. Some data may not import cleanly.</string>
+    <string name="settings_memory_import_pins_warning" tools:ignore="PluralsCandidate">%1$d of these chunks were pinned in the file. Pins are not imported — pin the ones you want again on the Memory screen.</string>
     <string name="settings_memory_import_provider_warning">Memory was exported with embedding provider \"%1$s\", which differs from the one you\'re using. Embeddings will be re-computed in the background after import.</string>
     <string name="settings_memory_import_success" tools:ignore="PluralsCandidate">Imported %1$d chunks, skipped %2$d duplicates.</string>
     <string name="settings_memory_import_reembed_note">Embeddings are being re-computed in the background.</string>
     <string name="settings_memory_import_failed">Import failed: %1$s</string>
+    <string name="settings_memory_import_too_large">This file is larger than %1$s, the most this device can import at once.</string>
 
     <!-- Restart-required banner -->
     <string name="settings_restart_required_message">This change needs a restart to take effect.</string>

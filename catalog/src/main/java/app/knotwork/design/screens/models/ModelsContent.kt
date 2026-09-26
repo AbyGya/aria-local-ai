@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -38,6 +39,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -70,6 +72,8 @@ private val ProgressBarHeight = 3.dp
  * @param modifier optional layout modifier applied to the root scaffold.
  * @param strings localised display strings (TopAppBar title + section labels + CTAs).
  * @param callbacks one-shot callback bundle.
+ * @param snackbarHost Where the screen's snackbars render: the Scaffold places it above its
+ *   bottom bar and floating action button. The app passes a `KnotworkSnackbarHost`.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -78,8 +82,10 @@ fun ModelsContent(
     modifier: Modifier = Modifier,
     strings: ModelsStrings = ModelsStrings(),
     callbacks: ModelsCallbacks = noopModelsCallbacks(),
+    snackbarHost: @Composable () -> Unit = {},
 ) {
     Scaffold(
+        snackbarHost = snackbarHost,
         modifier = modifier.fillMaxSize(),
         containerColor = MaterialTheme.colorScheme.surface,
         contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(left = 0, top = 0, right = 0, bottom = 0),
@@ -532,6 +538,15 @@ private fun InlineFieldRow(
                 onValueChange = onChange,
                 singleLine = true,
                 visualTransformation = transformation,
+                // A masked field holds a credential; the keyboard learns that only
+                // from the input type, so it neither suggests nor keeps the token.
+                keyboardOptions = if (masked) {
+                    KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                    )
+                } else {
+                    KeyboardOptions.Default
+                },
                 textStyle = KnotworkTextStyles.MonoBase.copy(color = MaterialTheme.colorScheme.onSurface),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 modifier = Modifier.fillMaxWidth(),
@@ -747,7 +762,7 @@ data class ModelsStrings(
     val customUrlPlaceholder: String = "https://huggingface.co/…/model",
     val customUrlGet: String = "Get",
     val customDownloadLabel: String = "Downloading custom model…",
-    val formatHint: String = ".litertlm · .task · .gguf (experimental)",
+    val formatHint: String = ".litertlm only",
     val presetsSection: String = "AVAILABLE PRESETS",
     val downloadedSection: String = "DOWNLOADED MODELS",
     val presetGet: String = "Get",

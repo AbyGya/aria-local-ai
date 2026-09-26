@@ -7,6 +7,7 @@ import app.knotwork.android.domain.models.NodeModel
 import app.knotwork.android.domain.models.NodeOutput
 import app.knotwork.android.domain.models.NodeType
 import app.knotwork.android.domain.models.Skill
+import app.knotwork.android.domain.prompt.ChatTranscript
 import app.knotwork.android.domain.prompt.PromptTemplateEngine
 import app.knotwork.android.domain.prompt.PromptVariableProvider
 import app.knotwork.android.domain.repositories.SkillRepository
@@ -38,7 +39,9 @@ import javax.inject.Inject
  *     outside the allowlist is rejected with a typed error observation and is
  *     never executed; an allowed call is dispatched through the shared
  *     [ToolInvocationGate], so the tool risk / Human-in-the-Loop contract is
- *     never weakened by the skill.
+ *     never weakened by the skill. The node's `alwaysConfirm` switch reaches the
+ *     gate exactly as it does from a TOOL node: it can add a confirmation to
+ *     every call the skill makes, never remove one.
  *
  * The instruction restriction is substantive, not cosmetic: scoping `$TOOLS`
  * keeps a tool out of the model's view, and the executor-level allowlist check
@@ -136,7 +139,9 @@ class SkillNodeExecutor @Inject constructor(
         val allowlist = skill.toolAllowlist
         if (allowlist != null && toolName !in allowlist) {
             val message = "Tool '$toolName' is not in skill '${skill.name}' allowlist and was not executed."
-            Timber.tag("PipelineDebug").w(message)
+            Timber.tag(
+                "PipelineDebug",
+            ).w("Tool '%s' is not in skill '%s' allowlist and was not executed.", toolName, skill.name)
             emit(NodeOutput.State(AgentOrchestratorState.ObservationResult(toolName, message)))
             emit(
                 NodeOutput.Result(
@@ -161,6 +166,7 @@ class SkillNodeExecutor @Inject constructor(
             runId = runId,
             resolvedToolName = toolName,
             resolvedToolArgs = toolArgs,
+            alwaysConfirm = node.alwaysConfirm == true,
         )
     }
 
@@ -214,6 +220,8 @@ private class ScopedToolsVariableProvider(
         val available = toolRepository.getAvailableTools()
         val visible = if (allowlist == null) available else available.filter { it.name in allowlist }
         if (visible.isEmpty()) return ""
-        return visible.joinToString(separator = "\n") { tool -> "${tool.name} — ${tool.description}" }
+        return visible.joinToString(separator = "\n") { tool ->
+            ChatTranscript.entry("${tool.name} — ", tool.description)
+        }
     }
 }

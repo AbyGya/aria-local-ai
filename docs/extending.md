@@ -205,6 +205,14 @@ add a `case` to `defaultRichConfig`, `richToFlat`, `encodeRichEnvelope`,
 Kotlin `NodeConfigCodec` encoder so a document round-trips through both
 editors unchanged.
 
+The envelope is not what runs, and the app never shows it for a field the run
+reads: `NodeConfigCodec.decode` takes every such field from the flat `config`
+block, so an imported file cannot display one value and run another. The flip
+side is that every producer has to write those fields into the flat block —
+the browser editor's `exportToJson` and every bundled preset — or the app shows
+the field empty or at its default. `BundledPresetEditabilityTest` fails for a
+preset whose flat block lacks a value its envelope sets.
+
 If your node **references another entity by id** (like `PIPELINE` →
 target pipeline, `SKILL` → skill), there are two extra obligations:
 
@@ -307,18 +315,20 @@ not edit it.
 
 Every tool has a `ToolRisk`:
 
-| Risk          | Behaviour                                                                 |
-|---------------|---------------------------------------------------------------------------|
-| `READ_ONLY`   | Runs immediately. No confirmation prompt.                                 |
-| `SENSITIVE`   | The orchestrator emits `PendingConfirmation` and suspends until approval. |
-| `DESTRUCTIVE` | Same as `SENSITIVE`. Use whenever data can be irreversibly modified.      |
+| Risk          | Behaviour                                                                                          |
+|---------------|----------------------------------------------------------------------------------------------------|
+| `READ_ONLY`   | Runs immediately, unless the user's *Approve tool calls* policy is `All`.                          |
+| `SENSITIVE`   | The gate emits `WaitingForApproval` and suspends until approval — unless the policy is `Never`.   |
+| `DESTRUCTIVE` | Asks under every policy, with a typed confirmation. Use whenever data can be irreversibly modified. |
 
 If your tool sends an email, deletes a file, makes a purchase, or
 mutates any system state the user would care to undo, set the risk to
-`DESTRUCTIVE`. If it reads private data (location, contacts, calendar)
-without modifying anything, set it to `SENSITIVE`. The
-human-in-the-loop gate in `ToolNodeExecutor` and the chat UI is
-non-optional — there is no code path that bypasses it.
+`DESTRUCTIVE` — it is the only tier no approval policy quiets. If it
+reads private data (location, contacts, calendar) without modifying
+anything, set it to `SENSITIVE`, knowing that a user who chose `Never`
+lets it run unasked. Which tiers ask is decided in one place,
+`ToolApprovalPolicy.requiresApproval`, and every tool call goes through
+`ToolInvocationGate` — there is no code path that bypasses the gate.
 
 For **discovered AppFunctions** (tools surfaced by `LocalAppFunctionManager`
 from other packages), the default is `SENSITIVE` — the platform
@@ -367,22 +377,21 @@ can never diverge. An unparsable call must fall back to the strictest risk.
 
 If you want a third-party app to be able to call your tool through the
 system [`AppFunctionManager`](https://developer.android.com/reference/android/app/appfunctions/AppFunctionManager),
-add an `@AppFunction`-annotated wrapper next to the existing
-[`SearchAppFunction`](../app/src/main/java/app/knotwork/android/data/tools/local/appfunctions/SearchAppFunction.kt).
-The library's `PlatformAppFunctionService` (from
-[`androidx.appfunctions`](https://developer.android.com/reference/androidx/appfunctions/package-summary),
-still alpha — the service class itself has no published reference page yet)
-is auto-merged from `appfunctions-service` and dispatches incoming
-requests through KSP-generated invokers — you do **not** subclass
-`AppFunctionService` or write a manual router.
+add an `@AppFunction` method to the app's one entry point,
+[`AgentAppFunctionService`](../app/src/main/java/app/knotwork/android/data/tools/local/appfunctions/AgentAppFunctionService.kt)
+— an abstract `AppFunctionService` annotated `@AppFunctionServiceEntryPoint`
+([`androidx.appfunctions`](https://developer.android.com/ai/appfunctions/add-appfunctions),
+still alpha). The AppFunctions compiler generates the concrete
+`KnotworkAppFunctionService` and its dispatch from it; you do **not** add a
+second entry point or write a manual router. Android 16 and later only.
 
 Publishing is open to any app; **being called is not**. Discovering and
 executing another app's AppFunctions requires `EXECUTE_APP_FUNCTIONS`,
 declared `internal|privileged` on Android 16 and granted to privileged
-system apps only — so in practice the caller that reaches your wrapper
+system apps only — so in practice the caller that reaches your function
 is a system assistant, not an arbitrary app from the store. Publish the
-wrapper anyway if the function belongs in that catalogue, but do not
-expect a peer app to invoke it.
+function anyway if it belongs in that catalogue, but do not expect a
+peer app to invoke it.
 
 Only expose tools that are safe to run on behalf of an unknown caller —
 typically `READ_ONLY` operations. `schedule_task` and `delegate_task`
@@ -393,75 +402,69 @@ user's expectation of agency).
 `schedule_task` additionally refuses to schedule anything once more
 than `ScheduleTaskUseCase.MAX_SCHEDULED_RUNS_PER_HOUR` scheduled runs
 have started within the last hour, and returns that refusal as the tool
-result. The guard keys on the *rate of scheduled runs*, not on the depth
+result. A pipeline step that runs another pipeline is part of the
+scheduled run that reached it and does not count as a run of its own. The guard keys on the *rate of scheduled runs*, not on the depth
 of the queue: a task whose prompt tells the agent to schedule its own
 successor keeps exactly one item queued at all times, so queue depth
 never reveals it. Every task the tool schedules is tagged
 (`ScheduledTaskTag`) so the Active-tasks screen can name it and stop all
 of them at once without touching trigger or Quick-Settings work.
 
-1. **Create the wrapper.** Add a `@Singleton` class under
-   `data/tools/local/appfunctions/`. The first parameter must be
-   `androidx.appfunctions.AppFunctionContext` — the KSP compiler
-   rejects `@AppFunction` declarations whose first parameter is
-   anything else. Kotlin defaults on subsequent parameters are not
-   honoured, so normalise blank inputs inside the body if you want a
-   fallback:
+1. **Put the logic in an injectable class.** Add a `@Singleton` class
+   under `data/tools/local/appfunctions/`, next to
+   [`SearchAppFunction`](../app/src/main/java/app/knotwork/android/data/tools/local/appfunctions/SearchAppFunction.kt).
+   It needs nothing from AppFunctions, so it is unit-testable as is.
+   Kotlin defaults are not honoured at the wire level, so normalise blank
+   inputs inside the body if you want a fallback:
    ```kotlin
    @Singleton
    class MyAppFunction @Inject constructor(
        private val backingTool: BackingTool,
    ) {
-       @AppFunction
-       @Suppress("UnusedParameter")
-       suspend fun invoke(context: AppFunctionContext, arg: String): String {
+       suspend fun run(arg: String): String {
            require(arg.isNotBlank()) { "arg must be non-blank" }
            return backingTool.run(arg)
        }
    }
    ```
-2. **Register the Hilt-managed factory.** The AppFunctions runtime
-   calls a reflective no-arg constructor by default, which is
-   incompatible with `@Inject constructor(...)`. Add an entry to
-   `App.appFunctionConfiguration` so the runtime asks Hilt for an
-   instance:
+2. **Declare the function on the entry point.** Inject the class into
+   `AgentAppFunctionService` and add a one-line `@AppFunction` method that
+   delegates to it. With `isDescribedByKDoc = true` the method's KDoc
+   becomes the description the calling agent reads — write it for that
+   agent, and name parameters in plain words (a KDoc link reaches it as
+   literal brackets):
    ```kotlin
    @Inject
-   lateinit var myAppFunctionProvider: Provider<MyAppFunction>
+   internal lateinit var myAppFunction: MyAppFunction
 
-   override val appFunctionConfiguration: AppFunctionConfiguration
-       get() = AppFunctionConfiguration.Builder()
-           .addEnclosingClassFactory(SearchAppFunction::class.java) {
-               searchAppFunctionProvider.get()
-           }
-           .addEnclosingClassFactory(MyAppFunction::class.java) {
-               myAppFunctionProvider.get()
-           }
-           .build()
+   /**
+    * Does the thing, read-only.
+    *
+    * @param arg What to do it to. Must not be blank.
+    * @return The result, as plain text.
+    */
+   @AppFunction(isDescribedByKDoc = true)
+   suspend fun doThing(arg: String): String = myAppFunction.run(arg)
    ```
-3. **KSP auto-generates the rest.** The
-   `androidx.appfunctions:appfunctions-compiler` KSP processor — already
-   wired up in `app/build.gradle.kts` with
-   `appfunctions:aggregateAppFunctions=true` — emits the per-class
-   `*_AppFunctionInventory.kt` / `*_AppFunctionInvoker.kt` Kotlin
-   artefacts plus the leaf-app `app_functions.xml` and
-   `app_functions_v2.xml` under `assets/`. The platform indexer reads
-   the XML to advertise the function to other apps.
-4. **Wire id is `<ClassFQN>#<methodName>`.** Reference the KSP-generated
-   `MyAppFunctionIds` object for the canonical wire string. Caveat:
-   when any package segment is a Kotlin soft keyword (`data`, `value`,
-   …) the compiler bakes Kotlin source-level escaping into the literal
-   — see `SearchAppFunctionIds.INVOKE_ID`, whose value embeds literal
-   backticks around `data`. External callers must include the
-   backticks verbatim. Pick a package without soft-keyword collisions
-   if you can.
+3. **The compiler does the rest.** The
+   `androidx.appfunctions:appfunctions-compiler` KSP processor (wired up in
+   `app/build.gradle.kts`) regenerates `KnotworkAppFunctionService` with the
+   new branch and rewrites the generated `knotwork_app_functions.xml` asset,
+   which the platform indexer reads. The manifest entry does not change for a new
+   function; `AppFunctionServiceManifestGuardTest` fails if the service or
+   inventory name ever drifts from the entry point.
+4. **Wire id is `<entry point FQN>#<methodName>`.** The generated service
+   carries it as `KnotworkAppFunctionService.FUNCTION_ID_<METHOD>`. Caveat:
+   when any package segment is a Kotlin soft keyword (`data`, `value`, …)
+   the compiler bakes Kotlin source-level escaping into the literal — the
+   `search` id embeds literal backticks around `data`. External callers
+   must include the backticks verbatim.
 5. **Tests.**
-   - Unit-test the wrapper directly with a mocked `AppFunctionContext`
-     (`mockk(relaxed = true)`). Cover happy path, invalid arguments,
-     and the blank-fallback if applicable.
+   - Unit-test the logic class directly. Cover happy path, invalid
+     arguments, and the blank-fallback if applicable.
    - Add a scenario to
      [`AppFunctionsEndToEndTest`](../app/src/androidTest/java/app/knotwork/android/AppFunctionsEndToEndTest.kt)
-     that resolves the metadata via `observeAppFunctions` and invokes
+     that resolves the metadata via `searchAppFunctions` and invokes
      the function through `AppFunctionManager.executeAppFunction(...)`.
      The test currently skips on stock Android 16 because
      `EXECUTE_APP_FUNCTIONS` is declared `internal|privileged`, which a
@@ -535,14 +538,17 @@ Contract reminders specific to the workspace:
   blocks.
 - **Map the typed error, never throw for a refusable condition.** Workspace
   calls return `WorkspaceResult.Failure` with a `WorkspaceError`
-  (`PathOutsideWorkspace`, `NotFound`, `NotAText`, `AlreadyExists`,
-  `IsDirectory`, `TooLarge`, `QuotaExceeded`, `AnchorNotFound`,
+  (`PathOutsideWorkspace`, `InvalidPath`, `NotFound`, `NotAText`,
+  `AlreadyExists`, `IsDirectory`, `TooLarge`, `QuotaExceeded`, `AnchorNotFound`,
   `AnchorNotUnique`). Turn each into a short, model-readable observation
   string. A refused call must surface as a `ToolResult.Error` so the run
   continues — it must not crash the pipeline.
-- **Respect the quotas; don't recompute them.** The per-file and workspace-wide
-  limits are enforced inside `writeText` / `importBytes`. Never stage bytes
-  outside the workspace to dodge them.
+- **Respect the quotas; don't recompute them.** The per-file, workspace-wide
+  and entry-count limits are enforced inside `writeText` / `importBytes`. Never
+  stage bytes outside the workspace to dodge them.
+- **Render names through `WorkspaceListingFormat`.** A name created before the
+  name rules may still carry a line break; the shared renderer escapes it, a
+  hand-rolled one would let it forge a line.
 
 **Step 2 — register it like any other tool.** Add the `@Binds @IntoMap
 @StringKey(CountLinesExecutor.TOOL_NAME)` entry to
@@ -586,8 +592,8 @@ existing `*ExecutorTest` files.
 
 Cloud providers are dispatched by the single unified `CLOUD` node. You
 do **not** create a new node type for a new provider — you teach the
-existing factory and resolver about it. This keeps `pipeline-editor.html`
-and the engine untouched.
+existing factory and resolver about it. The engine stays untouched; the
+browser editor needs one line (3.1).
 
 ### 3.1. Extend the `CloudProvider` enum
 
@@ -596,6 +602,12 @@ Add a constant to
 with a stable wire-id (the lowercase string used in pipeline JSON,
 e.g. `"mistral"`). Existing values are
 `OPENAI`, `ANTHROPIC`, `GOOGLE`, `DEEPSEEK`, `OLLAMA`.
+
+Then add a `case` for the new id to `wireToTile` in `pipeline-editor.html`,
+on the tile it belongs to. The browser editor reads a pipeline file's provider
+ids through that one function, the way `CloudProvider.fromId` does, and
+`verifyBrowserEditorConstants` fails while an id the app accepts is missing
+from it — otherwise the browser would show such a node as on-device or Auto.
 
 ### 3.2. Implement client construction
 
@@ -942,7 +954,10 @@ the starter ("quick action") cards shown on a new chat's empty state when
 this pipeline is the active one. Each entry is `{ "title": "…",
 "toolsHint": "…" }`; `toolsHint` is optional and, when omitted, the card
 renders without its `uses · …` subtitle. Keep the hints honest — only name
-tools the pipeline actually wires:
+tools the pipeline actually wires. For an imported file the app checks it: a
+hint keeps only the tools a Tool node of the same pipeline calls by name (a Tool
+node that lets the model choose backs none). Every pipeline keeps at most six
+prompts, each title one line of at most 200 characters:
 
 ```json
 "samplePrompts": [
@@ -1008,7 +1023,12 @@ validation error blocking Save. Declare the classes to match the node's
 outgoing edge labels, in the same order, and set `fallbackClass` to the
 **first** of them — the runtime routes on those labels and falls through to
 the first outgoing edge when the model emits nothing recognised, so any
-other declaration would be a lie the editor shows the user:
+other declaration would be a lie the editor shows the user. The canvas does not
+hide such a lie: an edge label no class names is drawn as a port of its own.
+Edges out of `IF_CONDITION`, `QUEUE_PROCESSOR` and `EVALUATION` carry the
+branch labels `RouteLabels` lists (`True`/`False`, `Item`/`Done`,
+`Pass`/`Retry`/`Fail`); the importer saves any letter case as the port spells
+it and refuses any other label:
 
 ```json
 "nodeConfig": {
@@ -1389,7 +1409,7 @@ do I reach for" lookup.
 | Choose from ≤ 8 mutually exclusive values                    | segmented `KnotworkFilterChip(size = Sm)` row                                          |
 | Choose from > 8 values                                       | catalog dropdown (out of scope for this guide)                                         |
 | Search bar                                                   | `KnotworkTextField(size = Md, search = true)`                                          |
-| Password / API key / token                                   | `KnotworkPasswordField`                                                                |
+| Password / API key / token                                   | `KnotworkPasswordField` — or, in a bespoke field, `KeyboardType.Password` and masking (`SecretFieldImeTest`) |
 | Chat input                                                   | catalog `ChatComposer` (`components/chat/ChatComposer.kt`)                             |
 | Inline rename (toolbar title)                                | `KnotworkTextField(size = Sm)` without external `KnotworkField` wrapper                |
 
@@ -1454,11 +1474,11 @@ double-check it for every recipe in this guide.**
 |------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | A new `NodeType`             | `domain/models/NodeType.kt` · a new `NodeExecutor` implementation · `domain/engine/executors/NodeExecutorFactory.kt` · `domain/models/NodeContextConfig.kt` (`defaultForType`) · `domain/models/PipelineGraph.kt` (`validate`, if special invariants) · `buildtools/BrowserEditorConstantsGenerator.kt` (`NODE_TYPE_META`) + run `./gradlew :app:generateBrowserEditorConstants` · `buildtools/CookbookDocsGenerator.kt` (`NODE_DOC_META` + a `FIELD_REACH` entry per config field) + run `./gradlew :app:generateCookbookDocs` · **`pipeline-editor.html`** (`defaultContextConfig`, `NODE_TYPE_TOOLTIPS`, optional `DEFAULT_SYSTEM_PROMPTS`; for typed config also `defaultRichConfig` / `richToFlat` / `encodeRichEnvelope` / `decodeRichEnvelope` / `deriveRichFromFlat` / `renderFormFields` / `validateRichConfig`) · executor unit test · `GraphExecutionEngineTest` |
 | A node type that **references another entity by id** (`PIPELINE` / `SKILL`) | the flat `NodeModel` field (`targetPipelineId` / `skillId`) · `domain/pipelineio/PipelineJsonSerializer.kt` (emit + read the id in the flat `config` block) · `domain/models/PipelineGraph.kt` (`validate` → `MissingTargetPipeline` / `MissingSkill`) · `domain/services/PipelineCompositionValidator.kt` (transitive cycle / depth) · **`pipeline-editor.html`** (flat `config` key in `exportToJson`/`importFromJson`, reference form, self-ref + unresolved-id validation, node badge) · `PipelineJsonSerializerTest` round-trip |
-| A new field on a `NodeConfig` (catalog) | `catalog/.../pipelineeditor/NodeConfig.kt` · `NodeConfigForms.kt` + `NodeConfigValidation.kt` if it is edited · `presentation/ui/pipeline/editor/config/NodeConfigCodec.kt` (encode/decode, and `apply` if it must reach the runtime) · `buildtools/CookbookDocsGenerator.kt` (`FIELD_REACH` — generation fails without it) + run `./gradlew :app:generateCookbookDocs` · `CookbookRuntimeReachTest` checks the published verdict against the codec · **`pipeline-editor.html`** envelope encode/decode so the field round-trips — and, if its verdict is `RoundTripOnly`, **no** control in `renderFormFields`: `verifyBrowserEditorConstants` fails on a form control for a field no run reads |
+| A new field on a `NodeConfig` (catalog) | `catalog/.../pipelineeditor/NodeConfig.kt` · `NodeConfigForms.kt` + `NodeConfigValidation.kt` if it is edited · `presentation/ui/pipeline/editor/config/NodeConfigCodec.kt` (encode/decode, and `apply` if it must reach the runtime) · `buildtools/CookbookDocsGenerator.kt` (`FIELD_REACH` — generation fails without it) + run `./gradlew :app:generateCookbookDocs` · `CookbookRuntimeReachTest` checks the published verdict against the codec · **`pipeline-editor.html`** envelope encode/decode so the field round-trips — and, if its verdict is `RoundTripOnly`, **no** control in `renderFormFields`: `verifyBrowserEditorConstants` fails on a form control for a field no run reads. A `Runtime` field needs the whole chain instead — read from the flat `config` in `importFromJson`, set in `deriveRichFromFlat`, a control in `renderFormFields`, written by `encodeRichEnvelope` and `richToFlat`, exported by `exportToJson`, and never read from the envelope in `decodeRichEnvelope` (the one exception is the closed `LEGACY_ENVELOPE_FALLBACK` list in `BrowserEditorRuntimeFieldGuard`, for files older editors wrote); the same task names the missing link. The browser's import may read only `config` keys the app's importer reads (`CONFIG_KEYS` in `PipelineJsonSerializer`) — `BrowserEditorImportParityGuard` |
 | A new `Tool`                 | a new `LocalToolExecutor` implementation · `di/LocalToolsModule.kt` (`@Binds @IntoMap @StringKey`) · declare `ToolRisk` correctly · executor unit test · optional Compose test if new UI                                                                            |
 | A new **workspace tool**     | a new `LocalToolExecutor` that goes through `AgentWorkspace` (never raw `File`) · `di/LocalToolsModule.kt` (`@Binds @IntoMap @StringKey`) · risk tier in `ToolRepositoryImpl` built-in list · `docs/user-guide.md` (built-in-tools table) · executor unit test against a `@TempDir`-backed `AgentWorkspace` (happy path + `../` traversal + quota/not-found) |
-| A new callee-side AppFunction | a new `@AppFunction`-annotated wrapper under `data/tools/local/appfunctions/` (first param `AppFunctionContext`) · `App.appFunctionConfiguration` (`addEnclosingClassFactory(...)`) · wrapper unit test with a mocked `AppFunctionContext` · scenario in `AppFunctionsEndToEndTest` |
-| A new cloud provider         | `domain/models/CloudProvider.kt` · `data/engine/KoogClientFactory.kt` · `data/engine/KoogCloudLlmModelResolver.kt` · `data/local/ApiKeyManager.kt` · `presentation/ui/settings/SettingsScreen.kt` · **`domain/engine/executors/CloudLlmNodeExecutor.kt`** (`providerReportsFinishReason` — exhaustive `when`, decide it by measurement per §3.6) · `docs/user-guide.md` (the truncated-answer table under Settings → Models) · factory / resolver / executor unit tests |
+| A new callee-side AppFunction | an injectable logic class under `data/tools/local/appfunctions/` · a one-line `@AppFunction(isDescribedByKDoc = true)` method on `AgentAppFunctionService` (KDoc written for the calling agent) · logic-class unit test · scenario in `AppFunctionsEndToEndTest` |
+| A new cloud provider         | `domain/models/CloudProvider.kt` · `data/engine/KoogClientFactory.kt` · `data/engine/KoogCloudLlmModelResolver.kt` · `data/local/ApiKeyManager.kt` · `domain/models/ProviderSummary.kt` (`ProviderId` — the Settings provider list and picker) · **`domain/engine/executors/CloudLlmNodeExecutor.kt`** (`providerReportsFinishReason` — exhaustive `when`, decide it by measurement per §3.6) · `docs/user-guide.md` (the truncated-answer table under Settings → Models) · factory / resolver / executor unit tests |
 | A new prompt variable        | a new `PromptVariableProvider` implementation · `di/PromptTemplateModule.kt` (`@Binds @IntoSet`) · **`pipeline-editor.html`** (`PROMPT_VARIABLES`) · `docs/user-guide.md` (variables table) · provider unit test · `PromptTemplateEngine` round-trip test           |
 | A new bundled pipeline preset | a JSON file under `assets/presets/pipelines/` · `PipelinePresetCatalogValidationTest.expectedFileNames` · `BundledPresetCatalog.DISPLAY_ORDER` (unless `internal`) · run `./gradlew :app:generateBrowserEditorConstants` (`BUILTIN_PIPELINE_PRESETS` is generated) · catalogue + `PipelinePresetIntegrationTest` already cover the directory |
 | A new bundled prompt preset  | a JSON file under `assets/presets/prompts/` · `PromptPresetCatalogValidationTest.expectedFileNames` · run `./gradlew :app:generateBrowserEditorConstants` (`BUILTIN_PROMPT_TEMPLATES` is generated) · catalogue + `PromptPresetIntegrationTest` already cover the directory |

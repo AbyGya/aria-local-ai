@@ -736,4 +736,66 @@ class AppDatabaseMigrationHelperTest {
             }
         }
     }
+
+    /**
+     * v62 → v63 adds `chat_messages.imported`. Every row that existed before was written
+     * on this device, so it must come out `0` — and the schema must match the exported
+     * `63.json`, which `runMigrationsAndValidate` checks.
+     */
+    @Test
+    fun migrate62to63_marksExistingMessagesAsWrittenOnThisDevice() {
+        helper.createDatabase(TEST_DB, 62).use { db ->
+            db.execSQL(
+                "INSERT INTO chat_messages(sessionId, role, content, timestamp) " +
+                    "VALUES('sess-1', 'USER', 'hello', 100)",
+            )
+        }
+
+        helper.runMigrationsAndValidate(TEST_DB, 63, true, AppDatabase.MIGRATION_62_63).use { db ->
+            db.query("SELECT imported FROM chat_messages WHERE content = 'hello'").use { c ->
+                assertTrue("the pre-existing message must survive the migration", c.moveToFirst())
+                assertEquals("a pre-existing message was written on this device", 0, c.getInt(0))
+            }
+        }
+    }
+
+    /**
+     * v63 → v64 adds `background_prompts`, where the prompts of queued background
+     * runs now live instead of the runtime's unencrypted store. The table starts
+     * empty and must be writable — and the schema must match the exported `64.json`.
+     */
+    @Test
+    fun migrate63to64_addsAnEmptyWritableBackgroundPromptsTable() {
+        helper.createDatabase(TEST_DB, 63).close()
+
+        helper.runMigrationsAndValidate(TEST_DB, 64, true, AppDatabase.MIGRATION_63_64).use { db ->
+            db.query("SELECT COUNT(*) FROM background_prompts").use { c ->
+                assertTrue(c.moveToFirst())
+                assertEquals(0, c.getInt(0))
+            }
+            db.execSQL("INSERT INTO background_prompts(id, prompt, createdAt) VALUES('p-1', 'check emails', 1)")
+        }
+    }
+
+    /**
+     * v64 → v65 adds `chat_messages.relayed`. How an earlier row was produced was
+     * never recorded, so a pre-existing message keeps the behaviour it had: not
+     * relayed. The schema must match the exported `65.json`.
+     */
+    @Test
+    fun migrate64to65_marksExistingMessagesAsNotRelayed() {
+        helper.createDatabase(TEST_DB, 64).use { db ->
+            db.execSQL(
+                "INSERT INTO chat_messages(sessionId, role, content, timestamp) " +
+                    "VALUES('sess-1', 'AGENT', 'an answer', 100)",
+            )
+        }
+
+        helper.runMigrationsAndValidate(TEST_DB, 65, true, AppDatabase.MIGRATION_64_65).use { db ->
+            db.query("SELECT relayed FROM chat_messages WHERE content = 'an answer'").use { c ->
+                assertTrue("the pre-existing message must survive the migration", c.moveToFirst())
+                assertEquals("a pre-existing message is not marked relayed", 0, c.getInt(0))
+            }
+        }
+    }
 }

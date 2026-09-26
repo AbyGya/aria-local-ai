@@ -5,18 +5,24 @@ import ai.koog.prompt.executor.clients.LLMClient
 import ai.koog.prompt.llm.LLModel
 import ai.koog.prompt.streaming.StreamFrame
 import app.knotwork.android.data.engine.KoogClientFactory
+import app.knotwork.android.data.repositories.NetworkActivityTrackerImpl
 import app.knotwork.android.domain.engine.CloudClientUnavailability
 import app.knotwork.android.domain.models.CloudProvider
 import app.knotwork.android.domain.repositories.ApiKeyRepository
 import app.knotwork.android.domain.repositories.MemoryRepository
+import app.knotwork.android.domain.repositories.NetworkActivityTracker
 import app.knotwork.android.domain.services.EmbeddingProvider
 import app.knotwork.android.domain.services.EmbeddingProviderResolver
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -33,6 +39,7 @@ class DelegateTaskToolTest {
     private lateinit var apiKeyRepository: ApiKeyRepository
     private lateinit var delegateTaskTool: DelegateTaskTool
     private lateinit var mockClient: LLMClient
+    private lateinit var networkActivity: NetworkActivityTrackerImpl
 
     @Before
     fun setup() {
@@ -42,6 +49,7 @@ class DelegateTaskToolTest {
         embeddingProvider = mockk()
         apiKeyRepository = mockk(relaxed = true)
         mockClient = mockk(relaxed = true)
+        networkActivity = NetworkActivityTrackerImpl()
 
         coEvery { embeddingProviderResolver.resolve() } returns embeddingProvider
 
@@ -56,7 +64,54 @@ class DelegateTaskToolTest {
             memoryRepository = memoryRepository,
             embeddingProviderResolver = embeddingProviderResolver,
             apiKeyRepository = apiKeyRepository,
+            networkActivityTracker = networkActivity,
         )
+    }
+
+    @Test
+    fun `given a client when executeDelegation then the privacy indicator records the call`() = runTest {
+        // A delegated task goes to a cloud provider — the indicator must not keep saying
+        // "no network calls" while it does.
+        coEvery { koogClientFactory.createAnthropicExecutor() } returns mockClient
+        coEvery { mockClient.executeStreaming(any<Prompt>(), any<LLModel>()) } returns
+            kotlinx.coroutines.flow.flowOf(StreamFrame.TextDelta("done"))
+        coEvery { embeddingProvider.embed("done") } returns floatArrayOf(0.1f)
+
+        delegateTaskTool.executeDelegation("Summarise this", "anthropic")
+
+        assertNotNull("the delegated call left without being recorded", networkActivity.lastOutboundAt.value)
+    }
+
+    @Test
+    fun `given a streamed answer when executeDelegation then the indicator is told for as long as it streams`() =
+        runTest {
+            val tracker = mockk<NetworkActivityTracker>(relaxed = true)
+            val tool = DelegateTaskTool(
+                koogClientFactory = koogClientFactory,
+                memoryRepository = memoryRepository,
+                embeddingProviderResolver = embeddingProviderResolver,
+                apiKeyRepository = apiKeyRepository,
+                networkActivityTracker = tracker,
+            )
+            coEvery { koogClientFactory.createAnthropicExecutor() } returns mockClient
+            coEvery { mockClient.executeStreaming(any<Prompt>(), any<LLModel>()) } returns
+                kotlinx.coroutines.flow.flowOf(StreamFrame.TextDelta("a"), StreamFrame.TextDelta("b"))
+            coEvery { embeddingProvider.embed("ab") } returns floatArrayOf(0.1f)
+
+            tool.executeDelegation("Summarise this", "anthropic")
+
+            // Once before the call, once per frame.
+            verify(exactly = 3) { tracker.recordOutbound() }
+        }
+
+    @Test
+    fun `given no client can be built when executeDelegation then nothing is recorded`() = runTest {
+        coEvery { koogClientFactory.createAnthropicExecutor() } returns null
+        coEvery { koogClientFactory.unavailabilityOf(CloudProvider.ANTHROPIC) } returns null
+
+        delegateTaskTool.executeDelegation("Summarise this", "anthropic")
+
+        assertNull(networkActivity.lastOutboundAt.value)
     }
 
     @Test
@@ -110,6 +165,27 @@ class DelegateTaskToolTest {
             coVerify(exactly = 0) { memoryRepository.saveMemory(any(), any(), any(), any()) }
         }
     }
+
+    @Test
+    fun `given the delegated client throws with a key in the url when executeDelegation then the result is scrubbed`() =
+        runTest {
+            // The tool result is persisted as the node output, shown in the console and
+            // fed back to the model as its observation — none of those may carry the key.
+            val leakedKey = "AIzaSyTESTKEY"
+            coEvery { koogClientFactory.createGoogleExecutor() } returns mockClient
+            coEvery { mockClient.models() } returns emptyList()
+            every { mockClient.llmProvider() } returns mockk(relaxed = true)
+            coEvery { mockClient.executeStreaming(any<Prompt>(), any<LLModel>()) } throws RuntimeException(
+                "Socket timeout has expired [url=https://generativelanguage.googleapis.com/v1beta/models/" +
+                    "gemini:streamGenerateContent?alt=sse&key=$leakedKey]",
+            )
+
+            val result = delegateTaskTool.executeDelegation("Task", "google")
+
+            assertTrue(result, result.startsWith("Error: Task delegation failed"))
+            assertFalse("key leaked: $result", result.contains(leakedKey))
+            assertTrue("scrub marker missing: $result", result.contains("key=***"))
+        }
 
     @Test
     fun `executeDelegation returns error when target model is unsupported`() = runTest {

@@ -20,11 +20,14 @@ import java.io.OutputStream
  *    canonicalisation gate. A relative path that canonicalises outside the
  *    workspace root (`../` traversal, an absolute path, a symlink escaping the
  *    sandbox) is refused with [WorkspaceError.PathOutsideWorkspace] before any
- *    I/O reaches the target.
+ *    I/O reaches the target. A path the filesystem cannot take (a NUL byte, or
+ *    one it rejects), and a new entry whose path breaks [WorkspaceNamePolicy],
+ *    is refused with [WorkspaceError.InvalidPath].
  *  - **Quotas.** Writes are checked against a per-file size limit
- *    ([WorkspaceError.TooLarge]) and a workspace-wide total-size limit
- *    ([WorkspaceError.QuotaExceeded]) so a looping pipeline cannot exhaust
- *    device storage.
+ *    ([WorkspaceError.TooLarge]), a workspace-wide total-size limit and a ceiling
+ *    on the number of files and directories (both [WorkspaceError.QuotaExceeded])
+ *    so a looping pipeline cannot exhaust device storage. A directory never
+ *    outlives its contents.
  *  - **Text-only surface (for now).** Only UTF-8 text is read and written.
  *    Binary files remain visible in [list] but cannot be text-read
  *    ([WorkspaceError.NotAText]).
@@ -85,10 +88,12 @@ interface AgentWorkspace {
      *   file is replaced.
      * @return [WorkspaceResult.Success] with the resulting [WorkspaceFile]
      *   metadata, or [WorkspaceResult.Failure] with
-     *   [WorkspaceError.PathOutsideWorkspace], [WorkspaceError.AlreadyExists]
-     *   (a file is already there and `overwrite` is `false`),
-     *   [WorkspaceError.IsDirectory] (the path is a directory),
-     *   [WorkspaceError.TooLarge] or [WorkspaceError.QuotaExceeded].
+     *   [WorkspaceError.PathOutsideWorkspace], [WorkspaceError.InvalidPath] (a
+     *   new file's path breaks [WorkspaceNamePolicy]),
+     *   [WorkspaceError.AlreadyExists] (a file is already there and `overwrite`
+     *   is `false`), [WorkspaceError.IsDirectory] (the path is a directory),
+     *   [WorkspaceError.TooLarge] or [WorkspaceError.QuotaExceeded] (the bytes or
+     *   the entries would exceed their ceiling).
      */
     suspend fun writeText(
         relativePath: String,
@@ -112,6 +117,7 @@ interface AgentWorkspace {
      * @param content Text to append, encoded as UTF-8.
      * @return [WorkspaceResult.Success] with the resulting [WorkspaceFile] metadata,
      *   or [WorkspaceResult.Failure] with [WorkspaceError.PathOutsideWorkspace],
+     *   [WorkspaceError.InvalidPath] (a new file's path breaks [WorkspaceNamePolicy]),
      *   [WorkspaceError.IsDirectory] (the path is a directory),
      *   [WorkspaceError.NotAText] (existing content is binary),
      *   [WorkspaceError.TooLarge] or [WorkspaceError.QuotaExceeded].
@@ -155,7 +161,9 @@ interface AgentWorkspace {
      * operation; the file tool layered on top routes it through the strictest
      * Human-in-the-Loop confirmation path. Only regular files are deletable: a
      * path that resolves to a directory (or to nothing) is reported as
-     * [WorkspaceError.NotFound], never silently traversed.
+     * [WorkspaceError.NotFound], never silently traversed. The directories above
+     * the file that the delete leaves empty are removed with it, and so is every
+     * copy of the file [stageForShare] made.
      *
      * @param relativePath Path of the file to delete, relative to the workspace
      *   root.
@@ -170,7 +178,8 @@ interface AgentWorkspace {
      *
      * Returns a stable, path-sorted list of [WorkspaceFile] entries for the
      * regular files in the tree (directories are traversed but not emitted as
-     * entries). Binary files are included with [WorkspaceFile.isText] `false`.
+     * entries; a symbolic link is never followed). Binary files are included with
+     * [WorkspaceFile.isText] `false`.
      * An empty (or not-yet-created) workspace yields an empty list.
      *
      * @return [WorkspaceResult.Success] with the listing. Listing the root never
@@ -229,9 +238,9 @@ interface AgentWorkspace {
      *   replaced.
      * @return [WorkspaceResult.Success] with the resulting [WorkspaceFile]
      *   metadata, or [WorkspaceResult.Failure] with
-     *   [WorkspaceError.PathOutsideWorkspace], [WorkspaceError.AlreadyExists],
-     *   [WorkspaceError.IsDirectory], [WorkspaceError.TooLarge] or
-     *   [WorkspaceError.QuotaExceeded].
+     *   [WorkspaceError.PathOutsideWorkspace], [WorkspaceError.InvalidPath],
+     *   [WorkspaceError.AlreadyExists], [WorkspaceError.IsDirectory],
+     *   [WorkspaceError.TooLarge] or [WorkspaceError.QuotaExceeded].
      */
     suspend fun importBytes(
         relativePath: String,
@@ -257,4 +266,32 @@ interface AgentWorkspace {
      *   [WorkspaceError.PathOutsideWorkspace] or [WorkspaceError.NotFound].
      */
     suspend fun exportTo(relativePath: String, sink: OutputStream): WorkspaceResult<Unit>
+
+    /**
+     * Stages a copy of the file at [relativePath] for the system share sheet and
+     * returns where the copy is.
+     *
+     * The share sheet is handed the copy, never the workspace. The copy is the
+     * workspace's to clean up: [delete] removes every copy of the file it deletes,
+     * and a copy older than an hour is removed by the next staging (and by the
+     * daily maintenance pass) — never sooner, so staging one share does not take
+     * another share's copy from an app still reading it.
+     *
+     * @param relativePath Path of the file to share, relative to the workspace root.
+     * @return [WorkspaceResult.Success] with the copy's absolute path, or
+     *   [WorkspaceResult.Failure] with [WorkspaceError.PathOutsideWorkspace] or
+     *   [WorkspaceError.NotFound].
+     */
+    suspend fun stageForShare(relativePath: String): WorkspaceResult<String>
+
+    /**
+     * Deletes the whole workspace — every file and directory in it — for the
+     * user-confirmed recovery wipe (*Erase data*), and nothing else. The workspace
+     * is recreated empty on its next use. Share copies live in the transient cache and
+     * go with it ([TransientCacheSweeper.sweepAll]).
+     *
+     * @return `true` when nothing of the workspace is left on disk, `false` when
+     *   something could not be deleted.
+     */
+    suspend fun eraseAll(): Boolean
 }

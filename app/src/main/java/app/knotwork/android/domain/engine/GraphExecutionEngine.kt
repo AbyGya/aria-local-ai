@@ -26,6 +26,8 @@ import app.knotwork.android.domain.models.PendingInteractionKind
 import app.knotwork.android.domain.models.PipelineGraph
 import app.knotwork.android.domain.models.PipelineRunStatus
 import app.knotwork.android.domain.models.ResumeContext
+import app.knotwork.android.domain.models.Role
+import app.knotwork.android.domain.models.RouteLabels
 import app.knotwork.android.domain.models.RunBudgetLedger
 import app.knotwork.android.domain.models.RunContextNotes
 import app.knotwork.android.domain.models.RunGeneratingModel
@@ -109,11 +111,17 @@ constructor(
 ) {
 
     /**
-     * Resumes execution after user approval.
+     * Completes the live approval request [requestId] of [sessionId] with the
+     * user's decision; delegates to the [ToolNodeExecutor] singleton that owns
+     * the per-session suspension primitives.
+     *
+     * @param sessionId chat session id whose pending approval is being resolved.
+     * @param requestId identity of the request the decision was given for.
+     * @param isApproved `true` if the user approved tool execution, `false` to deny it.
+     * @return `true` when the decision settled the live request it names.
      */
-    fun resumeWithApproval(sessionId: String, isApproved: Boolean) {
-        toolNodeExecutor.resumeWithApproval(sessionId, isApproved)
-    }
+    fun resumeWithApproval(sessionId: String, requestId: String, isApproved: Boolean): Boolean =
+        toolNodeExecutor.resumeWithApproval(sessionId, requestId, isApproved)
 
     /**
      * Returns the approval request the run of [sessionId] is currently
@@ -272,7 +280,12 @@ constructor(
             // sub-pipeline name so the merged console reads as `[Translator] ▶ …`
             // even before indentation; [depth] additionally drives the indented
             // rendering. Top-level runs keep the bare message.
-            val displayMessage = if (depth > 0) "[${graph.name}] $message" else message
+            //
+            // Every console line is redacted here: it is shown, copied whole by *Copy
+            // all*, and persisted in the run trace, and an executor's own diagnostics
+            // may quote a provider error (see CloudErrorSanitizer).
+            val redacted = CloudErrorSanitizer.redactSecrets(message)
+            val displayMessage = if (depth > 0) "[${graph.name}] $redacted" else redacted
             val event = ConsoleEvent(
                 timestamp = System.currentTimeMillis(),
                 type = type,
@@ -440,6 +453,11 @@ constructor(
         var currentNode: NodeModel? = inputNode
         var stepCount = 0
         var currentInputText = userPrompt
+        // Whether a model wrote `currentInputText` (ModelAuthorship): the run's
+        // prompt is the user's, a tool's result is not a model's, and a
+        // pass-through node keeps whatever it received. The root OUTPUT records
+        // it on the chat row so memory extraction skips relayed text.
+        var currentInputByModel = false
 
         val activeQueue = mutableListOf<String>()
         var activeQueueProcessorId: String? = null
@@ -798,6 +816,16 @@ constructor(
                     } else {
                         ChatHistoryView.EMPTY
                     }
+                    // Read only when the node feeds the on-device model and
+                    // there is tool text to cut: a result of this run, or an
+                    // observation row (SYSTEM) in the history it replays.
+                    val hasToolText = toolInvocationResults.isNotEmpty() ||
+                        chatHistoryView.liveWindow.any { it.role == Role.SYSTEM }
+                    val toolResultCharBudget = if (hasToolText && feedsOnDeviceModel(currentNode)) {
+                        settingsRepository.workspaceReadTokenBudget.first() * ChatHistoryWindowPlanner.CHARS_PER_TOKEN
+                    } else {
+                        null
+                    }
                     val executionContext = PipelineExecutionContext(
                         originalUserMessage = userPrompt,
                         chatHistory = chatHistoryView.liveWindow,
@@ -805,6 +833,7 @@ constructor(
                         toolResults = toolInvocationResults.toList(),
                         memoryEntries = memoryEntries,
                         earlierSummary = chatHistoryView.earlierSummary,
+                        toolResultCharBudget = toolResultCharBudget,
                     )
                     // No fallback to currentInputText: an empty result is the
                     // intended outcome of a sparse config (e.g. only toolResults=true
@@ -908,6 +937,7 @@ constructor(
                             imagePresent = imagePresent,
                             generatingModel = genModel,
                             runOrigin = origin,
+                            inputWrittenByModel = currentInputByModel,
                         ),
                     )
                         .collect { output ->
@@ -923,7 +953,7 @@ constructor(
                                         runSuspended =
                                             persistSuspensionTransition(runId, output.state, runSuspended)
                                     }
-                                    emit(output.state)
+                                    emit(output.state.withRedactedError())
                                 }
                                 is NodeOutput.Result -> nodeResult = output.result
                                 is NodeOutput.Console -> {
@@ -978,14 +1008,19 @@ constructor(
                     // keep the flow alive past its collector's cancellation.
                     throw e
                 } catch (e: Exception) {
+                    // The exception may be a provider's, quoting its key. The throwable
+                    // still goes to Timber for its stack trace — the crash-reporting tree
+                    // redacts every record it forwards — but the text surfaced and
+                    // persisted from here is redacted at this line.
+                    val safeMessage = CloudErrorSanitizer.redactSecrets(e.message ?: "Unknown error")
                     Timber.tag(
                         "PipelineDebug",
-                    ).e(e, "[NODE_ERR] type=${currentNode.type.name} id=${currentNode.id} error=${e.message}")
+                    ).e(e, "[NODE_ERR] type=%s id=%s error=%s", currentNode.type.name, currentNode.id, safeMessage)
                     pushConsole(
                         ConsoleEventType.Error,
-                        "${currentNode.type.name}: ${e.message ?: "Unknown error"}",
+                        "${currentNode.type.name}: $safeMessage",
                     )
-                    emit(AgentOrchestratorState.Error(e.message ?: "Unknown error"))
+                    emit(AgentOrchestratorState.Error(safeMessage))
                     return@flow
                 }
                 nodeDurationMs = System.currentTimeMillis() - nodeStartMs
@@ -1057,13 +1092,18 @@ constructor(
             }
             val nodeTokenCount = nodeResult?.tokenCount
 
-            if (nodeResult?.error != null) {
+            val nodeError = nodeResult?.error?.let(CloudErrorSanitizer::redactSecrets)
+            if (nodeError != null) {
+                // Every node's failure passes this line on its way to the run record,
+                // the console and the surface, so this is where a credential quoted
+                // in a provider error is stopped regardless of which executor
+                // produced it — or forgot to scrub it.
                 Timber.tag(
                     "PipelineDebug",
-                ).e("[NODE_ERR] type=${currentNode.type.name} id=${currentNode.id} error=${nodeResult?.error}")
+                ).e("[NODE_ERR] type=%s id=%s error=%s", currentNode.type.name, currentNode.id, nodeError)
                 pushConsole(
                     ConsoleEventType.Error,
-                    "${currentNode.type.name}: ${nodeResult?.error}",
+                    "${currentNode.type.name}: $nodeError",
                 )
                 // A queue whose author turned `stopOnError` off keeps going: the
                 // failure becomes this item's result and the next item starts.
@@ -1080,9 +1120,10 @@ constructor(
                 val queueNode = failedQueueId?.let { id -> graph.nodes.find { it.id == id } }
                 val survivable = nodeResult?.terminationReason == null
                 if (survivable && failedQueueId != null && queueNode?.stopOnError == false) {
-                    queueResults.add("Subtask failed: ${nodeResult?.error}")
+                    queueResults.add("Subtask failed: $nodeError")
                     val step = stepQueue(graph, failedQueueId, activeQueue, queueResults)
                     if (step.queueFinished) activeQueueProcessorId = null
+                    currentInputByModel = false
                     currentInputText = step.inputText
                     currentNode = step.node
                     continue
@@ -1090,7 +1131,7 @@ constructor(
                 // A `PIPELINE` node forwards its sub-pipeline's typed cause here.
                 // Re-emitting it is what keeps a ceiling breach one nesting
                 // level down from settling the root run as an ordinary failure.
-                emit(AgentOrchestratorState.Error(nodeResult?.error!!, reason = nodeResult?.terminationReason))
+                emit(AgentOrchestratorState.Error(nodeError, reason = nodeResult?.terminationReason))
                 return@flow
             }
 
@@ -1280,9 +1321,9 @@ constructor(
                 activeQueueProcessorId = currentNode.id
 
                 val edges = graph.connections.filter { it.sourceNodeId == currentNode.id }
-                val itemNodeId = edges.find { it.label.equals("Item", ignoreCase = true) }?.targetNodeId
+                val itemNodeId = edges.find { RouteLabels.matches(it.label, RouteLabels.ITEM) }?.targetNodeId
                     ?: edges.firstOrNull()?.targetNodeId
-                val doneNodeId = edges.find { it.label.equals("Done", ignoreCase = true) }?.targetNodeId
+                val doneNodeId = edges.find { RouteLabels.matches(it.label, RouteLabels.DONE) }?.targetNodeId
 
                 if (activeQueue.isNotEmpty() && itemNodeId != null) {
                     // Compute dynamic total: current steps already done + all queue iterations + tail after queue.
@@ -1298,6 +1339,9 @@ constructor(
                         "Result of Subtask ${i + 1}:\n$res"
                     }.joinToString("\n\n")
                     val subtaskInstruction = DefaultPrompts.QueueProcessor.SUBTASK_INSTRUCTION
+                    // Assembled from earlier results and a planned subtask: the
+                    // app's text around other nodes' output, so not a model's.
+                    currentInputByModel = false
                     currentInputText = if (contextStr.isNotEmpty()) {
                         "PREVIOUS RESULTS CONTEXT:\n$contextStr\n\n---\n\n$subtaskInstruction\n\nCURRENT SUBTASK TO EXECUTE:\n$nextItem"
                     } else {
@@ -1314,6 +1358,8 @@ constructor(
 
             // INTENT_ROUTER's outputText is the routing key — a control signal, not a content payload.
             // Preserve currentInputText so downstream nodes receive the original data, not the routing label.
+            currentInputByModel =
+                ModelAuthorship.after(currentNode.type, nodeResult, currentInputText, currentInputByModel)
             currentInputText = if (currentNode.type == NodeType.INTENT_ROUTER) {
                 currentInputText
             } else {
@@ -1333,6 +1379,7 @@ constructor(
                 queueResults.add(currentInputText)
                 val step = stepQueue(graph, activeQueueId, activeQueue, queueResults)
                 if (step.queueFinished) activeQueueProcessorId = null
+                currentInputByModel = false
                 currentInputText = step.inputText
                 currentNode = step.node
                 continue
@@ -1427,16 +1474,16 @@ constructor(
         }
 
         val targetNodeId = if (currentNode.type == NodeType.IF_CONDITION) {
-            val expectedLabel = if (conditionResult == true) "True" else "False"
-            val oppositeLabel = if (conditionResult == true) "False" else "True"
-            val exactTarget = edges.find { it.label.equals(expectedLabel, ignoreCase = true) }?.targetNodeId
+            val expectedLabel = if (conditionResult == true) RouteLabels.TRUE else RouteLabels.FALSE
+            val oppositeLabel = if (conditionResult == true) RouteLabels.FALSE else RouteLabels.TRUE
+            val exactTarget = edges.find { RouteLabels.matches(it.label, expectedLabel) }?.targetNodeId
             when {
                 exactTarget != null -> exactTarget
                 // The author wired the opposite branch but left this one
                 // unconnected: terminate the branch (-> "terminated without
                 // OUTPUT") instead of silently falling through to an arbitrary
                 // first edge and running the wrong branch on this verdict.
-                edges.any { it.label.equals(oppositeLabel, ignoreCase = true) } -> null
+                edges.any { RouteLabels.matches(it.label, oppositeLabel) } -> null
                 // No True/False labels at all — a single default edge. Keep the
                 // legacy fall-through so an unlabelled pass-through still routes.
                 else -> edges.firstOrNull()?.targetNodeId
@@ -1449,7 +1496,7 @@ constructor(
             // repair attempts — which is why the fallback has to cover the null
             // case, and why it was reachable by nothing when it did not.
             val matchedEdge = routingKey?.let { key ->
-                edges.find { it.label?.equals(key, ignoreCase = true) == true }
+                edges.find { RouteLabels.matches(it.label, key) }
                     ?: edges.find { !it.label.isNullOrBlank() && routingKeyContainsLabelAsWord(key, it.label) }
             }
             matchedEdge?.targetNodeId ?: unmatchedRouterTarget(currentNode, edges)
@@ -1457,7 +1504,7 @@ constructor(
             // EVALUATION emits a Pass / Retry / Fail verdict as the routing key;
             // route to the edge whose label matches the verdict, falling back to
             // the first outgoing edge when the verdict has no dedicated port.
-            edges.find { it.label?.equals(routingKey, ignoreCase = true) == true }?.targetNodeId
+            edges.find { RouteLabels.matches(it.label, routingKey) }?.targetNodeId
                 ?: edges.firstOrNull()?.targetNodeId
         } else {
             edges.firstOrNull()?.targetNodeId
@@ -1505,9 +1552,9 @@ constructor(
         results: List<String>,
     ): QueueStep {
         val edges = graph.connections.filter { it.sourceNodeId == queueProcessorId }
-        val itemNodeId = edges.find { it.label.equals("Item", ignoreCase = true) }?.targetNodeId
+        val itemNodeId = edges.find { RouteLabels.matches(it.label, RouteLabels.ITEM) }?.targetNodeId
             ?: edges.firstOrNull()?.targetNodeId
-        val doneNodeId = edges.find { it.label.equals("Done", ignoreCase = true) }?.targetNodeId
+        val doneNodeId = edges.find { RouteLabels.matches(it.label, RouteLabels.DONE) }?.targetNodeId
 
         if (remainingItems.isEmpty() || itemNodeId == null) {
             val summary = "Queue execution completed.\nResults:\n" +
@@ -1704,6 +1751,25 @@ constructor(
     private fun shouldComposeContext(node: NodeModel): Boolean = node.usesContextConfig()
 
     /**
+     * Whether [node]'s composed input is a prompt for the on-device model, so
+     * tool text in it is cut to the user's single-read budget.
+     *
+     * A CLOUD node, and any node given a cloud provider, runs on a provider's
+     * window the user does not size here — it gets tool text whole, bounded by
+     * the response budget only. A TOOL node counts like any other: its input
+     * never reaches the tool as it is, it is the prompt the model turns into the
+     * tool's arguments, on the local model unless the node names a provider.
+     *
+     * @param node a node whose context is being composed.
+     * @return `true` when the node's executor prompts the local model.
+     */
+    private fun feedsOnDeviceModel(node: NodeModel): Boolean = when (node.type) {
+        NodeType.LITE_RT -> true
+        NodeType.CLOUD -> false
+        else -> node.cloudProvider.isNullOrBlank()
+    }
+
+    /**
      * Which console channel a protective stop belongs on.
      *
      * The walk exits through one seam whatever decided to end it, so the choice
@@ -1818,6 +1884,18 @@ constructor(
             tokensSpent = ledger.tokensSpent,
         )
     }
+
+    /**
+     * Returns this state with a credential quoted in its error message masked, and
+     * any other state unchanged.
+     *
+     * An executor forwards its own `Error` straight to the engine's collector, and from
+     * there it becomes the run record's message — the one the chat export and the
+     * trigger-journal export share. Redacting here covers the executors that scrub
+     * their provider errors and the ones that do not.
+     */
+    private fun AgentOrchestratorState.withRedactedError(): AgentOrchestratorState =
+        if (this is AgentOrchestratorState.Error) copy(message = CloudErrorSanitizer.redactSecrets(message)) else this
 
     private companion object {
         /**

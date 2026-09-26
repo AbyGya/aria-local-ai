@@ -17,9 +17,13 @@
     to a public host — and it is enforced at every point that opens a connection
     to a user-configured address:
 
-      * KoogClientFactory.rawOllama()      — the local LLM endpoint
+      * ModelNetworkGate.ollamaRefusal()  — the Ollama endpoint, asked by both
+                                           KoogClientFactory (chat) and
+                                           OllamaEmbeddingProvider (memory)
       * McpConnectionPool                  — every MCP connection
-      * CleartextGuardInterceptor          — the shared OkHttp client, per request
+      * CleartextGuardInterceptor          — the shared OkHttp client, every hop
+                                           (before the first lookup, and on each
+                                           redirect OkHttp follows)
 
     The trade-off (the platform no longer blocks a cleartext redirect inside the
     third-party Koog / Ktor stacks) is recorded in `project_docs/decisions.md`.

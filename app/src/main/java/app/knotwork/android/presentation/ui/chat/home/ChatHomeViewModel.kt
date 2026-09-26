@@ -26,14 +26,15 @@ import app.knotwork.android.domain.services.AttachmentStore
 import app.knotwork.android.domain.services.AudioCaptureStore
 import app.knotwork.android.domain.services.AudioRecorder
 import app.knotwork.android.domain.services.ChatHistoryCompressionCoordinator
+import app.knotwork.android.domain.services.ImageCaptureStore
 import app.knotwork.android.domain.services.MemoryAutoExtractionCoordinator
 import app.knotwork.android.domain.usecases.AgentOrchestratorUseCase
 import app.knotwork.android.domain.usecases.ArchiveChatUseCase
 import app.knotwork.android.domain.usecases.AttachmentMessageContent
+import app.knotwork.android.domain.usecases.CheckImageAttachmentUseCase
 import app.knotwork.android.domain.usecases.ExportChatUseCase
 import app.knotwork.android.domain.usecases.GetContextWindowUseCase
 import app.knotwork.android.domain.usecases.LoadModelUseCase
-import app.knotwork.android.domain.usecases.ResolveEntryInferenceUseCase
 import app.knotwork.android.domain.usecases.ResumePipelineRunUseCase
 import app.knotwork.android.domain.usecases.SaveMessageToMemoryUseCase
 import app.knotwork.android.domain.usecases.SubmitApprovalDecisionUseCase
@@ -143,7 +144,8 @@ constructor(
     private val submitClarificationAnswerUseCase: SubmitClarificationAnswerUseCase,
     private val submitCeilingDecisionUseCase: SubmitCeilingDecisionUseCase,
     private val attachmentStore: AttachmentStore,
-    private val resolveEntryInferenceUseCase: ResolveEntryInferenceUseCase,
+    private val imageCaptureStore: ImageCaptureStore,
+    private val checkImageAttachmentUseCase: CheckImageAttachmentUseCase,
     private val audioRecorder: AudioRecorder,
     private val audioCaptureStore: AudioCaptureStore,
     private val transcribeAudioUseCase: TranscribeAudioUseCase,
@@ -283,7 +285,8 @@ constructor(
         scope = viewModelScope,
         state = _state,
         attachmentStore = attachmentStore,
-        resolveEntryInferenceUseCase = resolveEntryInferenceUseCase,
+        imageCaptureStore = imageCaptureStore,
+        checkImageAttachment = checkImageAttachmentUseCase,
         sessions = { threads.sessionsSnapshot() },
     )
 
@@ -772,8 +775,10 @@ constructor(
             return
         }
         viewModelScope.launch {
+            // Never a row imported from a chat file: that is not a turn the user sent,
+            // whatever its date says.
             val lastUserMessage = chatRepository.getMessagesForSession(sessionId).first()
-                .lastOrNull { it.role == Role.USER }
+                .lastOrNull { it.role == Role.USER && it.writtenOnThisDevice }
             if (lastUserMessage == null) {
                 _state.update { it.copy(visual = it.restingVisual()) }
                 return@launch
@@ -1278,7 +1283,12 @@ constructor(
                 // Attribute the answer to the model that actually generated it
                 // (snapshotted on the message), not the currently-active one;
                 // legacy rows without a recorded model fall back to the active name.
-                model = if (role == ChatRole.Assistant) message.modelName ?: activeModelName else null,
+                // An imported answer came from some other model; the active one did not write it.
+                model = if (role == ChatRole.Assistant && message.writtenOnThisDevice) {
+                    message.modelName ?: activeModelName
+                } else {
+                    null
+                },
                 status = ChatMessageStatus.Sent,
             )
             val idPrefix = when (role) {
@@ -1343,8 +1353,11 @@ data class PipelineSummary(
  * @property toolName fully-qualified tool id (e.g. `fs.write_file`).
  * @property arguments raw JSON-encoded argument blob emitted by the agent.
  * @property risk per-tool risk tier resolved by `ToolRepository.getRisk`.
+ * @property requestId identity of the request this card shows. The card's
+ *   answer names it, so it settles this request or nothing — which is also what
+ *   makes the risk above the right one to decide the typed confirmation by.
  */
-data class HitlPending(val toolName: String, val arguments: String, val risk: ToolRisk)
+data class HitlPending(val toolName: String, val arguments: String, val risk: ToolRisk, val requestId: String)
 
 /**
  * Snapshot of the session's interrupted run, exposed through

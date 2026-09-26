@@ -53,17 +53,19 @@ import app.knotwork.android.domain.constants.DefaultPrompts
  * @property quickReplies CLARIFICATION only: comma-separated answers offered as
  * chips under the question, replacing the ones the model would have produced.
  * `null` or blank leaves the model's own options in place.
- * @property alwaysConfirm TOOL only: `true` asks for approval on every call
- * through this node, whatever the tool's risk. `null` / `false` inherits the
- * tool's risk and the user's settings.
+ * @property alwaysConfirm TOOL and SKILL — the node types that dispatch tools:
+ * `true` asks for approval on every call through this node, whatever the tool's
+ * risk. `null` / `false` inherits the tool's risk and the user's approval policy.
+ * Other node types make no tool call, so the field has nothing to act on there.
  *
  * Deliberately one-directional. The per-node control can only make the gate
- * **stricter**, never weaker, for the same reason the app-wide
- * `requiresUserConfirmation` can: a pipeline file is a document that can be
- * shared, and a node able to declare "do not ask about this destructive call"
- * would let a document written by someone else walk past the gate.
+ * **stricter**, never weaker: a pipeline file is a document that can be shared,
+ * and a node able to declare "do not ask about this destructive call" would let
+ * a document written by someone else walk past the gate.
  * @property maxSubtasks DECOMPOSITION only: how many sub-tasks are kept from the
- * generated list. `null` keeps every one the model produced.
+ * generated list. `null` (or a value below 1) means [DEFAULT_MAX_SUBTASKS] — the
+ * number the node sheet shows for a node without a value, so what the author sees
+ * is what runs.
  * @property stopOnError QUEUE_PROCESSOR only: `true` (and `null`, the historical
  * behaviour) fails the whole run on the first failing item; `false` records the
  * failure as that item's result and carries on with the next one.
@@ -98,4 +100,13 @@ data class NodeModel(
     val stopOnError: Boolean? = null,
     val contextConfig: NodeContextConfig = NodeContextConfig.ALL_ENABLED,
     val configJson: String? = null,
-)
+) {
+    /** Defaults shared by the engine and the node sheet. */
+    companion object {
+        /**
+         * How many sub-tasks a DECOMPOSITION node keeps when [maxSubtasks] is not
+         * set: the value the node sheet shows and saves for such a node.
+         */
+        const val DEFAULT_MAX_SUBTASKS: Int = 5
+    }
+}

@@ -9,6 +9,7 @@ import app.knotwork.android.domain.models.SharedPayload
 import app.knotwork.android.domain.repositories.ChatRepository
 import app.knotwork.android.domain.repositories.PendingInteractionRepository
 import app.knotwork.android.domain.repositories.SettingsRepository
+import app.knotwork.android.domain.repositories.ShareAdmissionRepository
 import app.knotwork.android.domain.services.AttachmentStore
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -24,24 +25,28 @@ import org.junit.Test
 
 /**
  * Unit tests for [LaunchSharePipelineUseCase]: the empty / unbound guards, the
- * text-only, image-only and failed-ingest launch branches, and the single-chat
- * session-reuse toggle.
+ * rate ceiling, the text-only, image-only and failed-ingest launch branches, and
+ * the single-chat session-reuse toggle.
  */
 class LaunchSharePipelineUseCaseTest {
 
-    private val resolveSurfacePipeline = mockk<ResolveSurfacePipelineUseCase>()
+    private val resolveSurfacePipeline = mockk<ResolveLaunchableSurfacePipelineUseCase>()
     private val chatRepository = mockk<ChatRepository>(relaxed = true)
     private val attachmentStore = mockk<AttachmentStore>()
+    private val checkImageAttachment = mockk<CheckImageAttachmentUseCase>()
     private val orchestrator = mockk<AgentOrchestratorUseCase>(relaxed = true)
     private val settingsRepository = mockk<SettingsRepository>()
     private val pendingInteractionRepository = mockk<PendingInteractionRepository>()
+    private val shareAdmissions = mockk<ShareAdmissionRepository>()
     private val useCase = LaunchSharePipelineUseCase(
         resolveSurfacePipeline,
         chatRepository,
         attachmentStore,
+        checkImageAttachment,
         orchestrator,
         settingsRepository,
         pendingInteractionRepository,
+        shareAdmissions,
     )
 
     init {
@@ -50,6 +55,10 @@ class LaunchSharePipelineUseCaseTest {
         coEvery { chatRepository.getSessionById(any()) } returns null
         // Default: the Shared chat is not mid-approval.
         coEvery { pendingInteractionRepository.getForSession(any()) } returns null
+        // Default: the multimodal pre-flight lets an image through.
+        coEvery { checkImageAttachment(any()) } returns null
+        // Default: under the rate ceiling.
+        coEvery { shareAdmissions.admitWithinCeiling(any(), any(), any()) } returns true
     }
 
     private suspend fun launch(payload: SharedPayload): ShareLaunchResult = useCase(
@@ -57,7 +66,95 @@ class LaunchSharePipelineUseCaseTest {
         reusedSessionName = "Shared",
         imageSessionName = "Shared image",
         contentSessionName = "Shared content",
+        nowMillis = NOW,
     )
+
+    // --- Rate ceiling -------------------------------------------------------
+
+    @Test
+    fun `given the share ceiling is reached when a further share arrives then no run is enqueued`() = runTest {
+        coEvery { resolveSurfacePipeline(any()) } returns "pipe-1"
+        coEvery { shareAdmissions.admitWithinCeiling(any(), any(), any()) } returns false
+        coEvery { attachmentStore.ingestUri(any()) } returns Result.success(
+            MessageAttachment(path = "a.jpg", mimeType = "image/jpeg", width = 1, height = 1),
+        )
+
+        val result = launch(SharedPayload(text = "Read my notes and mail them", imageUri = "content://photos/1"))
+
+        assertEquals(ShareLaunchResult.RateLimited, result)
+        // Refused before any work: nothing stored, no chat created, no run.
+        coVerify(exactly = 0) { attachmentStore.ingestUri(any()) }
+        coVerify(exactly = 0) { chatRepository.saveSession(any()) }
+        coVerify(exactly = 0) { orchestrator(any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `given a share under the ceiling when launched then one admission is taken over the share window`() = runTest {
+        coEvery { resolveSurfacePipeline(any()) } returns "pipe-1"
+
+        val result = launch(SharedPayload(text = "summarise", imageUri = null))
+
+        assertTrue(result is ShareLaunchResult.Launched)
+        coVerify(exactly = 1) {
+            shareAdmissions.admitWithinCeiling(
+                nowMillis = NOW,
+                windowStartEpochMs = NOW - RunRateCeiling.ONE_HOUR_MILLIS,
+                limitPerWindow = RunRateCeiling.SHARE.limitPerWindow,
+            )
+        }
+    }
+
+    @Test
+    fun `given a share that will not run when invoked then it takes no admission`() = runTest {
+        // Only a share that is about to start a run counts against the ceiling: an
+        // empty, unbound or image-blocked share must not use up the hour's budget.
+        launch(SharedPayload(text = null, imageUri = null))
+        coEvery { resolveSurfacePipeline(any()) } returns null
+        launch(SharedPayload(text = "summarise", imageUri = null))
+        coEvery { resolveSurfacePipeline(any()) } returns "cloud-pipe"
+        coEvery { checkImageAttachment("cloud-pipe") } returns ImageAttachmentBlock.CLOUD_ENTRY
+        launch(SharedPayload(text = null, imageUri = "content://photos/1"))
+
+        coVerify(exactly = 0) { shareAdmissions.admitWithinCeiling(any(), any(), any()) }
+    }
+
+    @Test
+    fun `given the share pipeline starts on a CLOUD node when an image is shared then nothing is ingested`() = runTest {
+        coEvery { resolveSurfacePipeline(any()) } returns "cloud-pipe"
+        coEvery { checkImageAttachment("cloud-pipe") } returns ImageAttachmentBlock.CLOUD_ENTRY
+        coEvery { attachmentStore.ingestUri(any()) } returns Result.success(
+            MessageAttachment(path = "a.jpg", mimeType = "image/jpeg", width = 1, height = 1),
+        )
+
+        val result = launch(SharedPayload(text = "what is this", imageUri = "content://photos/1"))
+
+        assertEquals(ShareLaunchResult.Blocked(ImageAttachmentBlock.CLOUD_ENTRY), result)
+        coVerify(exactly = 0) { attachmentStore.ingestUri(any()) }
+        coVerify(exactly = 0) { chatRepository.saveSession(any()) }
+        coVerify(exactly = 0) { orchestrator(any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `given a text-only model when an image is shared then the share is blocked with that reason`() = runTest {
+        coEvery { resolveSurfacePipeline(any()) } returns "local-pipe"
+        coEvery { checkImageAttachment("local-pipe") } returns ImageAttachmentBlock.MODEL_NO_VISION
+
+        val result = launch(SharedPayload(text = null, imageUri = "content://photos/2"))
+
+        assertEquals(ShareLaunchResult.Blocked(ImageAttachmentBlock.MODEL_NO_VISION), result)
+    }
+
+    @Test
+    fun `given a text-only share into a cloud-first pipeline when invoked then the pre-flight is not consulted`() =
+        runTest {
+            coEvery { resolveSurfacePipeline(any()) } returns "cloud-pipe"
+            coEvery { checkImageAttachment(any()) } returns ImageAttachmentBlock.CLOUD_ENTRY
+
+            val result = launch(SharedPayload(text = "summarise", imageUri = null))
+
+            assertTrue(result is ShareLaunchResult.Launched)
+            coVerify(exactly = 0) { checkImageAttachment(any()) }
+        }
 
     @Test
     fun `given empty payload when invoked then reports NothingShared`() = runTest {
@@ -242,5 +339,10 @@ class LaunchSharePipelineUseCaseTest {
         assertEquals(2, ids.size)
         assertNotEquals(ids[0], ids[1])
         assertNotEquals(LaunchSharePipelineUseCase.SHARED_INBOX_SESSION_ID, ids[0])
+    }
+
+    private companion object {
+        /** A fixed "now" for the ceiling arithmetic. */
+        const val NOW = 1_800_000_000_000L
     }
 }

@@ -17,6 +17,7 @@ import app.knotwork.android.data.network.AndroidModelDownloadManager.DownloadErr
 import app.knotwork.android.domain.models.LocalModel
 import app.knotwork.android.domain.usecases.BenchmarkRunPhase
 import app.knotwork.android.presentation.ui.common.readPlainClipboardText
+import app.knotwork.design.components.misc.KnotworkSnackbarHost
 import app.knotwork.design.screens.models.ActiveModelRow
 import app.knotwork.design.screens.models.BenchmarkPhase
 import app.knotwork.design.screens.models.ModelsCallbacks
@@ -48,7 +49,7 @@ fun ModelsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
     val unknownErrorText = stringResource(R.string.models_error_unknown)
-    val defaultCustomFilename = stringResource(R.string.models_default_custom_filename)
+    val linkNotLitertlmText = stringResource(R.string.models_error_link_not_litertlm)
     val benchmarkFailedText = stringResource(R.string.models_benchmark_failed)
     val benchmarkShareSubject = stringResource(R.string.models_benchmark_share_subject)
     val strings = modelsStrings()
@@ -71,6 +72,10 @@ fun ModelsScreen(
     }
 
     LaunchedEffect(Unit) {
+        viewModel.customUrlRefusedEvents.collect { snackbarHostState.showSnackbar(linkNotLitertlmText) }
+    }
+
+    LaunchedEffect(Unit) {
         viewModel.benchmarkErrorEvents.collect {
             snackbarHostState.showSnackbar(benchmarkFailedText)
         }
@@ -88,13 +93,7 @@ fun ModelsScreen(
             onAuthTokenChange = viewModel::onAuthTokenChanged,
             onAuthTokenPaste = { viewModel.onAuthTokenChanged(readPlainClipboardText(context)) },
             onCustomUrlChange = viewModel::onCustomUrlChanged,
-            onCustomUrlSubmit = {
-                val url = uiState.customUrlInput
-                if (url.isNotBlank()) {
-                    val fileName = url.substringAfterLast(delimiter = "/").ifBlank { defaultCustomFilename }
-                    viewModel.startDownload(url, fileName)
-                }
-            },
+            onCustomUrlSubmit = viewModel::submitCustomUrl,
             onPresetDownload = { presetId ->
                 uiState.availablePresets.find { it.url.toPresetId() == presetId }?.let { preset ->
                     val fileName = preset.url.substringAfterLast(delimiter = "/")
@@ -128,6 +127,9 @@ fun ModelsScreen(
             onShareBenchmark = viewModel::onShareBenchmark,
             onDismissBenchmark = viewModel::onDismissBenchmark,
         ),
+        // The screen showed download and benchmark failures through this state
+        // without ever rendering a host, so they never appeared.
+        snackbarHost = { KnotworkSnackbarHost(hostState = snackbarHostState) },
     )
 }
 
