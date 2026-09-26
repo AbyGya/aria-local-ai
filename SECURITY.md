@@ -425,6 +425,29 @@ new risk surface, and the design constrains it deliberately:
   autonomous run are visible and auditable in the same encrypted store as the
   rest of the conversation — never hidden.
 
+### Imported pipelines and the browser editor
+
+A pipeline file — imported into the app, or opened in the browser editor to
+look at it first — is content the user did not write. The importer
+(`PipelineJsonSerializer`) bounds what it can make the app store or show:
+
+- **What the editors show is what runs.** A file carries each node's settings
+  twice; the run reads the flat copy, and both editors display that copy rather
+  than the editor-only one. A router's branches are its outgoing edge labels,
+  and the canvas draws a port for each.
+- **Unclear or unsafe values refuse the file** instead of being guessed: an id
+  that is not one line of at most 128 characters, two nodes or edges sharing an
+  id, an edge label that names no branch of its node, an *Input data* switch
+  that is neither on nor off, a provider name the app does not know. Names and
+  labels become one bounded line; a file over 8 MB is not read.
+
+The browser editor is a second parser of the same format, and a file is often
+inspected there before it is imported. It reads a file by the app's rules — the
+same config keys, *Input data* flags, provider ids and branch labels — and a
+build-time guard (`BrowserEditorImportParityGuard`) checks each rule against the
+app's source. It is a single local page with its scripts inline, and it makes no
+network requests.
+
 ### Local usage statistics (on-device only)
 
 The optional **Usage statistics** screen records coarse counts of how the app is

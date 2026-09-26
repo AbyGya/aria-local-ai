@@ -93,9 +93,10 @@ from the first launch.
 ### 3.1 Cloud model providers (opt-in, your own key)
 
 If a pipeline step runs on a cloud provider and you have entered your own API
-key, the text that step processes — the prompt, the relevant conversation
-context, and any attachments it consumes — is sent to the provider you selected
-(OpenAI, Anthropic, Google Gemini, DeepSeek, or an Ollama endpoint you name).
+key, the text that step processes — the prompt and the relevant conversation
+context — is sent to the provider you selected (OpenAI, Anthropic, Google
+Gemini, DeepSeek, or an Ollama endpoint you name). Attachments are never sent
+to a cloud provider (section 4).
 That step is a **Cloud** node, or a router, condition, decomposition,
 evaluation, tool or skill node whose engine is set to a cloud provider.
 
@@ -273,8 +274,11 @@ that app's own policy applies from that point on.
   for. They are never sent anywhere else, and a saved provider key found in an
   outgoing `http_request` — in a header, the body or the address — causes that
   request to be refused outright.
-- **Attachments.** Images and audio you attach are processed by the on-device
-  model unless a cloud node in your pipeline consumes them (section 3.1).
+- **Attachments.** Images and audio you attach are never sent to a cloud
+  provider. An image is read only by the on-device model, and a pipeline that
+  would hand one to a cloud step is stopped before it runs; a voice message is
+  transcribed on the device, and only its text joins the conversation, like a
+  message you typed.
 - **Nothing is sent to the developer on its own.** The only two paths that can
   reach the developer at all are the optional crash reports of section 3.5 and
   a report you compose yourself. When you flag a model response, **Open issue**

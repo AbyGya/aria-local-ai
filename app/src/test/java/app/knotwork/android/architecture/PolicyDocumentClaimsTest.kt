@@ -60,6 +60,20 @@ class PolicyDocumentClaimsTest {
         assertTrue(security.contains("installation identifier"))
     }
 
+    @Test
+    fun `given attachments stay on the device then the privacy policy never sends one to a cloud step`() {
+        // An image is delivered only to an on-device LITE_RT node; CloudLlmNodeExecutor
+        // ignores the delivery channel, and a voice message is transcribed on the device.
+        assertFalse(privacy.contains("and any attachments it consumes"))
+        assertFalse(privacy.contains("unless a cloud node in your pipeline consumes them"))
+        assertTrue(privacy.contains("never sent to a cloud provider"))
+    }
+
+    @Test
+    fun `given the browser editor parses the same untrusted format then the threat model names it`() {
+        assertTrue(security.contains("BrowserEditorImportParityGuard"))
+    }
+
     private fun document(path: String): String {
         val working = File("").absoluteFile
         val root = if (File(working, "PRIVACY.md").isFile) working else working.parentFile
