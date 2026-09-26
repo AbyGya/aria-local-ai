@@ -89,8 +89,8 @@ Yes, including gated repositories once you have stored an access token. See
 
 ### What is the FOSS build and how does it differ?
 
-A second flavour with zero proprietary dependencies, built for F-Droid: no
-Firebase, no crash reporting, and no consent toggle for it. Everything else —
+A second flavour built for F-Droid: no crash reporting, no analytics, and no
+consent toggle for them. Everything else —
 local models, cloud providers, MCP, triggers — is identical. See
 [README § Install](../README.md#install).
 
@@ -254,7 +254,8 @@ External automation carries the same pair for inbound requests.
 
 Attach either to a bug report about background reliability — it says what the
 app actually did while you were not watching, which nothing else can. The file
-holds the journal rows only: no message a run was given, no answer it produced.
+holds the journal rows: a failed run's error message, but no message a run was
+given and no answer it produced.
 Neither action touches the network. See [Checking what a trigger has been
 doing](user-guide.md#checking-what-a-trigger-has-been-doing).
 

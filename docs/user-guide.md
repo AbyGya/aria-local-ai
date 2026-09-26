@@ -1532,7 +1532,9 @@ in rather than taken as written:
 - **The node settings you see are the ones that run.** A file keeps each node's
   settings twice — once for the run, once for the editor. Opening a node, in the
   app or in the browser editor, shows the copy the run uses, whatever the editor
-  copy says. The browser editor reads the file the way the app does, including
+  copy says. One exception: a router's classes live only in the editor copy. The
+  run chooses among the labels on the router's outgoing edges, so the canvas
+  draws a port for every one of them. The browser editor reads the file the way the app does, including
   a node's *Input data* switches and provider names in any letter case; a tool
   it has no entry for is shown by name and kept when you save.
 - **Unclear settings are refused, not guessed.** An *Input data* switch a file
@@ -1624,8 +1626,8 @@ file in a later build:
   format adds new fields without bumping the version, so a file written
   by a newer build can claim the same `schemaVersion` and still contain
   settings this build cannot read. That case used to be completely
-  invisible; it is now reported the same way, as a notice after the
-  import.
+  invisible; now a notice after the import says how many settings were
+  not kept. Only the version warning lists them by name.
 - **So keep the original file.** Naming the loss is not preventing it,
   and re-exporting after a lossy import overwrites the only complete copy
   you had.

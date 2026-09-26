@@ -416,8 +416,9 @@ new risk surface, and the design constrains it deliberately:
   journal and the external-request journal can be written to a file through the
   system share sheet on an explicit action. There is no network on that path —
   a build-time architecture check fails the build if a network dependency
-  reaches the export code — and the file carries the journal rows, not the
-  content of the runs they describe. Once the share sheet hands the file to
+  reaches the export code. The file carries the journal rows — including a
+  failed run's error message, which can quote the failing call — and never a
+  run's prompt or answer. Once the share sheet hands the file to
   another app, that app's handling is outside this threat model.
 - **Each trigger owns one bound chat.** A trigger's runs land in a single chat
   session named after it (recurring fires accumulate there), so the results of an
@@ -436,8 +437,8 @@ telemetry surface so a regression cannot quietly add an upload. Recording is a
 local-only opt-in the user can disable or clear at any time; the *Share as text*
 / *Export JSON* actions are voluntary, one-shot, and routed only to a
 destination the user picks (a share sheet or a file). This is **separate from
-crash reporting** below, which is the only path that can transmit anything
-off-device, and only after an explicit opt-in.
+crash reporting** below, the only telemetry the app can send, and only after an
+explicit opt-in.
 
 ### Message attachments — images and audio (on-device guarantee)
 
@@ -661,8 +662,10 @@ oversight — and it works as follows:
   answer can still reach the extractor, whose prompt tells the model to ignore
   the assistant's own statements. Two other paths put untrusted text into
   memory by design: `delegate_task` stores the cloud model's answer (it is
-  `SENSITIVE`, so it asks under the default policy), and shared text is read
-  as the user's message.
+  `SENSITIVE`, so it asks under the default policy), and text the user did not
+  type is read as the user's message — shared text, a `schedule_task`
+  instruction the model composed (`SENSITIVE`, and the approval card shows it),
+  and an external-automation request.
 - **AppFunctions exposed by other installed apps are not on that list**, and
   the omission is deliberate rather than an oversight. Calling another app's
   AppFunction needs `EXECUTE_APP_FUNCTIONS`, which Android 16 grants to
@@ -820,8 +823,11 @@ Crash reporting is **opt-in and disabled by default** — and entirely absent
 from the FOSS build:
 
 - **The `foss` (F-Droid) build has no crash reporting at all.** It ships no
-  Firebase/Google dependency, binds a no-op crash reporter that records and
-  transmits nothing, and hides the consent toggle. The controls below apply to
+  crash-reporting or analytics SDK, binds a no-op crash reporter that records
+  and transmits nothing, and hides the consent toggle. The on-device embedding
+  library does bring Google's data-transport libraries into both builds; `foss`
+  removes the components that could send anything (see
+  [docs/release.md](docs/release.md) § *Known residuals*). The controls below apply to
   the `full` distribution only. See [docs/release.md](docs/release.md) §
   *FOSS / F-Droid build*.
 - The `full` flavour's `AndroidManifest.xml` overlay sets both
@@ -851,6 +857,9 @@ following information may be transmitted to Firebase Crashlytics:
 - Two custom keys set by the pipeline engine: `active_pipeline_id` and
   `active_model` (the identifier of the pipeline and the model in use when
   the event occurred).
+- The random installation identifier Crashlytics creates to count affected
+  installations, and the Firebase installation ID it is rotated with. Neither is
+  derived from the user or the device hardware; both change on reinstall.
 
 The following are **never** transmitted off-device, even with crash reporting
 enabled:
