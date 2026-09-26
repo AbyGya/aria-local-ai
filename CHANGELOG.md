@@ -13,6 +13,8 @@ details.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-26
+
 ### Security
 
 - **A saved Hugging Face token is sent only to Hugging Face.** It used to go
@@ -293,7 +295,6 @@ details.
   what a local model can read. A node on the on-device model now gets each tool
   result cut to the **Single read budget**, with a note saying how much was
   left out; a node on a cloud provider still gets it whole.
-
 - **An imported pipeline's branches are drawn where the run takes them.** A
   router edge whose label named none of the router's classes was drawn from the
   first class's port and could still win most replies; it now has a port of its
@@ -301,7 +302,6 @@ details.
   was drawn from the wrong port; it is now saved as its port spells it, and a
   label that names no branch of the node refuses the file. The browser editor
   reads branch labels the same way.
-
 - **Keyboards are told when you type a secret.** The API-key, Hugging Face
   token and MCP credential fields, and the value of an MCP custom header, now
   ask the keyboard for a password input, so it does not suggest or learn what
@@ -403,7 +403,6 @@ details.
   With OpenAI or Ollama as the embedding model, memory writes and searches used
   the client library's 900-second defaults; they now use the chat clients'
   deadlines.
-
 - **The in-app FAQ no longer says the automation callback carries a run's
   output.** It carries the status only, as it always has.
 - **Rotating the phone with the camera open no longer loses the photo.** The
@@ -6319,7 +6318,8 @@ that produced the initial 0.1.0 snapshot.
 - **Master key**: `EncryptedSharedPreferences` is rooted in the Android
   Keystore, so the master key is hardware-backed where available.
 
-[Unreleased]: https://github.com/alexeyw/knotwork/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/alexeyw/knotwork/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/alexeyw/knotwork/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/alexeyw/knotwork/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/alexeyw/knotwork/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/alexeyw/knotwork/compare/v0.8.0...v0.9.0
