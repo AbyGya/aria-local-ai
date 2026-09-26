@@ -310,6 +310,12 @@ details.
 
 ### Changed
 
+- **The privacy policy says more exactly what can leave the phone.** A router,
+  condition or other node whose engine is set to a cloud provider is named as a
+  cloud path, not only a Cloud node; a crash report's random installation
+  identifier is listed; and the trigger journal export is described as holding a
+  failed run's error message. The FOSS build is described as having no crash
+  reporting or analytics, rather than no Firebase code at all.
 - **The app opens without loading the on-device model.** The start screen no
   longer waits for the model; the first message loads it, as it already did
   whenever the model had been unloaded after idling. Until a message is sent,

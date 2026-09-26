@@ -92,10 +92,12 @@ from the first launch.
 
 ### 3.1 Cloud model providers (opt-in, your own key)
 
-If you place a cloud node in a pipeline and enter your own API key, the text
-that node processes — the prompt, the relevant conversation context, and any
-attachments that node consumes — is sent to the provider you selected
+If a pipeline step runs on a cloud provider and you have entered your own API
+key, the text that step processes — the prompt, the relevant conversation
+context, and any attachments it consumes — is sent to the provider you selected
 (OpenAI, Anthropic, Google Gemini, DeepSeek, or an Ollama endpoint you name).
+That step is a **Cloud** node, or a router, condition, decomposition,
+evaluation, tool or skill node whose engine is set to a cloud provider.
 
 The request goes **directly from your device to that provider**. It does not
 pass through any infrastructure of the developer. Once it arrives, the
@@ -114,9 +116,8 @@ Two other paths reach the same providers, both also opt-in:
   It counts as a sensitive tool call, so it waits for your approval unless you
   set *Approve tool calls* to *Never*.
 
-Apart from those two, a pipeline without a cloud node never contacts a cloud
-provider. Cloud nodes are visible in the pipeline editor, so you can see whether
-one is present.
+Apart from those two, a pipeline contacts a cloud provider only through a step
+that runs on one. A node's settings show its engine, so you can see which do.
 
 **Block network from local model** (Settings → Tools & workspace) keeps every
 path in this section on your own network: no cloud provider is contacted — memory uses the
@@ -196,10 +197,12 @@ Crashlytics (Google) — **only** after you enable
 *Settings → Privacy → Send anonymous crash reports*, which is off by default.
 
 When enabled, a report may contain: the stack trace, device model, Android and
-app version, and two identifiers describing which pipeline and model were
-active. It **never** contains message content, prompts, model replies, memory
-entries, tool inputs or outputs, API keys, or anything stored in the encrypted
-stores. Full detail is in
+app version, two identifiers describing which pipeline and model were active,
+and a random installation identifier Crashlytics creates to count how many
+installations a crash affects. That identifier is not derived from you or your
+phone, and changes if you reinstall the app. It **never** contains message
+content, prompts, model replies, memory entries, tool inputs or outputs, API
+keys, or anything stored in the encrypted stores. Full detail is in
 [SECURITY.md](SECURITY.md#what-is-collected-crash-reporting).
 
 You can revoke consent at any time from the same setting. The `foss`
@@ -242,8 +245,10 @@ the device. The vocabulary of the contract is documented in
 The trigger journal and the external-request journal can be exported to a file
 through the system share sheet, by an explicit action you take in the app.
 There is no network on that path — a build-time architecture check fails the
-build if any network dependency reaches the export code — and the exported file
-does not contain the content of your runs.
+build if any network dependency reaches the export code. The exported file holds
+the journal rows: when a run failed, that includes its error message, which can
+quote part of the call that failed. It holds no message a run was given and no
+answer it produced.
 
 Where the file goes after the share sheet is decided by the app you pick, and
 that app's own policy applies from that point on.
