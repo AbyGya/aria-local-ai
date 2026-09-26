@@ -315,7 +315,9 @@ details.
   cloud path, not only a Cloud node; a crash report's random installation
   identifier is listed; and the trigger journal export is described as holding a
   failed run's error message. The FOSS build is described as having no crash
-  reporting or analytics, rather than no Firebase code at all.
+  reporting or analytics, rather than no Firebase code at all, and attachments
+  as never sent to a cloud provider, which the app already guaranteed. The
+  threat model now covers imported pipelines and the browser editor.
 - **The app opens without loading the on-device model.** The start screen no
   longer waits for the model; the first message loads it, as it already did
   whenever the model had been unloaded after idling. Until a message is sent,
