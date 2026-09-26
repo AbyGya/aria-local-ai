@@ -200,9 +200,9 @@ When enabled, a report may contain: the stack trace, device model, Android and
 app version, two identifiers describing which pipeline and model were active,
 and a random installation identifier Crashlytics creates to count how many
 installations a crash affects. That identifier is not derived from you or your
-phone, and changes if you reinstall the app. It **never** contains message content, prompts, model replies, memory
-entries, tool inputs or outputs, API keys, or anything stored in the encrypted
-stores. Full detail is in
+phone, and changes if you reinstall the app. It **never** contains message
+content, prompts, model replies, memory entries, tool inputs or outputs, API
+keys, or anything stored in the encrypted stores. Full detail is in
 [SECURITY.md](SECURITY.md#what-is-collected-crash-reporting).
 
 You can revoke consent at any time from the same setting. The `foss`

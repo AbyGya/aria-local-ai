@@ -827,9 +827,9 @@ from the FOSS build:
   and transmits nothing, and hides the consent toggle. The on-device embedding
   library does bring Google's data-transport libraries into both builds; `foss`
   removes the components that could send anything (see
-  [docs/release.md](docs/release.md) § *Known residuals*). The controls below apply to
-  the `full` distribution only. See [docs/release.md](docs/release.md) §
-  *FOSS / F-Droid build*.
+  [docs/release.md](docs/release.md) § *Known residuals*). The controls below
+  apply to the `full` distribution only. See
+  [docs/release.md](docs/release.md) § *FOSS / F-Droid build*.
 - The `full` flavour's `AndroidManifest.xml` overlay sets both
   `firebase_crashlytics_collection_enabled` and
   `firebase_analytics_collection_enabled` to `false`, which disables Firebase

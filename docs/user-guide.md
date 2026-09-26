@@ -1534,9 +1534,10 @@ in rather than taken as written:
   app or in the browser editor, shows the copy the run uses, whatever the editor
   copy says. One exception: a router's classes live only in the editor copy. The
   run chooses among the labels on the router's outgoing edges, so the canvas
-  draws a port for every one of them. The browser editor reads the file the way the app does, including
-  a node's *Input data* switches and provider names in any letter case; a tool
-  it has no entry for is shown by name and kept when you save.
+  draws a port for every one of them. The browser editor reads the file the
+  way the app does, including a node's *Input data* switches and provider
+  names in any letter case; a tool it has no entry for is shown by name and
+  kept when you save.
 - **Unclear settings are refused, not guessed.** An *Input data* switch a file
   leaves out takes that node type's usual setting; one set to anything but on
   or off (`true` / `false`) refuses the file, and so does a provider name the
