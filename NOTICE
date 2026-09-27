@@ -101,7 +101,8 @@ asset (app/src/main/assets/universal_sentence_encoder.tflite) and ships in the
 released APK/AAB:
 
   * Universal Sentence Encoder — Copyright Google LLC — Apache License 2.0
-    (https://www.kaggle.com/models/google/universal-sentence-encoder)
+    (the MediaPipe Text Embedder model, https://storage.googleapis.com/mediapipe-models/text_embedder/universal_sentence_encoder/float32/latest/universal_sentence_encoder.tflite;
+    model family: https://www.kaggle.com/models/google/universal-sentence-encoder)
 
 ================================================================================
 Development-time tooling (not distributed in the application)

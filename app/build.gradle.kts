@@ -322,8 +322,16 @@ android {
             // to the debug keystore so a clean checkout without a key still
             // produces a (debug-signed) release artefact. Provisioning details
             // and signature verification are documented in `docs/release.md`.
-            signingConfig = signingConfigs.findByName("release")
-                ?: signingConfigs.getByName("debug")
+            //
+            // The choice and the assignment are two statements on purpose.
+            // F-Droid's build server deletes `signingConfig = <one token>` lines
+            // before building, so its build comes out unsigned and can be checked
+            // against our published APK. An assignment written with spaces after
+            // the `=` is not deleted (its build would be debug-signed), and one
+            // split across lines loses only its first line.
+            // `FdroidSigningStripGuardTest` holds this shape.
+            val releaseSigningConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            signingConfig = releaseSigningConfig
             // Strip non-arm64 ABIs from the release APK. The reason is the
             // inference engine, not the API floor: `litertlm-android` ships
             // `jni/arm64-v8a` and `jni/x86` only — it has no `armeabi-v7a`
@@ -1904,6 +1912,12 @@ tasks.withType<Test>().configureEach {
     // code (SECURITY.md and the user guide are declared above).
     inputs.file(rootProject.file("docs/external-automation.md"))
         .withPropertyName("externalAutomationContract")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    // `FdroidSigningStripGuardTest` reads this very script. Editing it reconfigures
+    // the project but leaves this task's inputs as they were: measured, the signing
+    // assignment put back on two lines left the task UP-TO-DATE and green.
+    inputs.file(layout.projectDirectory.file("build.gradle.kts"))
+        .withPropertyName("appBuildScript")
         .withPathSensitivity(PathSensitivity.RELATIVE)
 }
 

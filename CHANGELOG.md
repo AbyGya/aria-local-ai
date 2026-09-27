@@ -13,6 +13,18 @@ details.
 
 ## [Unreleased]
 
+### Changed
+
+- **The licence list inside the app names the memory-search model.**
+  `THIRD_PARTY_LICENSES.txt` listed only the two fonts. It now also lists the
+  Universal Sentence Encoder model bundled for on-device memory search, with
+  its source and its Apache-2.0 licence. The About screen already credited it.
+- **F-Droid's build no longer depends on an accident in the build script.**
+  F-Droid removes signing settings before it builds. It removed half of the
+  two-line statement that picks the release key, and the other half compiled
+  only by chance. The statement is now split so that F-Droid removes the whole
+  assignment, and a test fails the build if that shape changes.
+
 ## [0.11.0] - 2026-09-26
 
 ### Security

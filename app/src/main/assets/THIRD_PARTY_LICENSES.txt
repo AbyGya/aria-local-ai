@@ -2,9 +2,9 @@ Third-party assets bundled in the Knotwork APK
 ==============================================
 
 This file inventories third-party assets shipped inside the application
-binary along with the licenses that govern their redistribution. See the
-matching license texts in this same `assets/` directory for the full
-SIL Open Font License v1.1 wording.
+binary along with the licenses that govern their redistribution. The full
+SIL Open Font License v1.1 texts for the two fonts are in this same
+`assets/` directory; the Apache License 2.0 is linked below.
 
 
 Inter font family
@@ -35,3 +35,20 @@ License: SIL Open Font License, Version 1.1 — see
 Modifications: same Latin-1 + typographic punctuation subset as Inter.
 No glyph shapes were modified; the JetBrains Mono reserved font name is
 preserved.
+
+
+Universal Sentence Encoder (text-embedding model)
+-------------------------------------------------
+
+File: `assets/universal_sentence_encoder.tflite`
+Upstream: MediaPipe Text Embedder model, distributed by Google at
+          https://storage.googleapis.com/mediapipe-models/text_embedder/universal_sentence_encoder/float32/latest/universal_sentence_encoder.tflite
+          (model family: https://www.kaggle.com/models/google/universal-sentence-encoder)
+Copyright Google LLC.
+License: Apache License, Version 2.0 —
+         https://www.apache.org/licenses/LICENSE-2.0
+
+Used for on-device semantic search of long-term memory.
+
+Modifications: none. The file is bundled as distributed; its metadata
+names the author as Google LLC.
