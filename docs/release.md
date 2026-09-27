@@ -665,7 +665,7 @@ JDK vendor, have all 277 entries CRC-identical. Before these changes, the
 published 0.10.1 APK and a local build of its commit differed in 5 of 278
 entries (`classes.dex`, the baseline profile and three native libraries).
 
-F-Droid's own server has since built 0.11.0 from its tag and matched the
+F-Droid's CI has since built 0.11.0 from its tag on Linux and matched the
 published `foss` APK. The app is submitted there as a reproducible build: F-Droid
 builds each tag, compares its build with `knotwork-<version>-foss-release.apk`
 from the GitHub release, and publishes that APK, signed with this project's key.
