@@ -672,10 +672,11 @@ from the GitHub release, and publishes that APK, signed with this project's key.
 A tag whose APK it cannot reproduce is not published on F-Droid at all.
 
 F-Droid strips signing configuration from the build script before it builds, so
-its build comes out unsigned. The stripper deletes a `signingConfig = <token>`
-line and nothing else, which is why the release build type chooses its signing
-config in one statement and assigns it, as a single name, in the next;
-`FdroidSigningStripGuardTest` fails the build if that shape changes.
+its build comes out unsigned. Its rule for the assignment deletes only a
+`signingConfig = <token>` line — a single name, no spaces — which is why the
+release build type chooses its signing config in one statement and assigns it,
+as a single name, in the next; `FdroidSigningStripGuardTest` fails the build if
+that shape changes.
 
 The `foss` release is otherwise a standard R8-minified arm64-v8a build (§4).
 
@@ -746,15 +747,15 @@ Gradle invocation, so the Google plugins stay out of it (§8) — `fossRelease`
 (APK), checks that both APKs ship the LiteRT-LM and MediaPipe Tasks libraries and
 not MediaPipe's excluded text-generation one (§5), re-verifies the signer of all
 three artefacts against `RELEASE_CERT_SHA256`, and attaches them plus a `SHA256SUMS.txt` to a **draft**
-GitHub Release.
+GitHub Release. The R8 mapping files are uploaded as a workflow artefact (90-day
+retention) rather than as a public asset — they belong with the maintainer, for
+deobfuscating crash reports.
 
 The name of the `foss` asset, `knotwork-<version>-foss-release.apk`, is part of
 the F-Droid build (§8): F-Droid downloads the APK by that name to check its own
 build against it. Rename it and F-Droid stops publishing new versions. A draft's
 assets cannot be downloaded, so F-Droid's check fails until the release is
-published. The R8 mapping files are uploaded as a workflow artefact (90-day
-retention) rather than as a public asset — they belong with the maintainer, for
-deobfuscating crash reports.
+published.
 
 Note that the release build only *injects* the Crashlytics mapping-file id
 (`injectCrashlyticsMappingFileIdFullRelease`); it does not upload the mapping.

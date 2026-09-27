@@ -34,11 +34,8 @@ class FdroidSigningStripGuardTest {
 
     @Test
     fun `given the app build script when F-Droid strips signing then no signing assignment survives`() {
-        // Given
-        val stripped = FdroidSigningStripper.strip(script)
-
         // When
-        val surviving = stripped.kept.filter { SIGNING_ASSIGNMENT.containsMatchIn(it) }
+        val surviving = FdroidSigningStripper.strip(script).kept.filter { SIGNING_ASSIGNMENT.containsMatchIn(it) }
 
         // Then
         assertTrue(

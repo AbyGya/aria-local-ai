@@ -75,11 +75,12 @@ That settles the first half of this item: a store listing exists, and so
 does a data-safety declaration matching the privacy model the app
 actually implements. What is left is the second channel.
 
-- **F-Droid.** Submitted, waiting for review. F-Droid builds the `foss`
-  APK from source and publishes it only if it matches the one on GitHub
-  Releases, so both carry the same signature and you can switch between
-  them without reinstalling. The open question is the reviewers': the
-  on-device inference engine ships as a prebuilt native library.
+- **F-Droid.** Submitted, waiting for review. It is set up as a
+  reproducible build: F-Droid builds the `foss` APK from source and
+  publishes it only if it matches the one on GitHub Releases, so both carry
+  the same signature and you can switch between them without reinstalling.
+  The open question is the reviewers': the on-device inference engine ships
+  as a prebuilt native library.
 
 Note the one-time migration cost described in the *Pre-release notice* of
 [README.md](../README.md): `0.7.0` is the first release-signed build, so
