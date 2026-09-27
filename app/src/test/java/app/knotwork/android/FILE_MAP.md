@@ -22,6 +22,7 @@ Only Kotlin files appear inside the generated blocks.
   - `EntrySurfaceLimitsDocumentsTest.kt` - Pins every number the public documents quote about the entry surfaces' limits to the constant that enforces it.
   - `ExportedComponentInventoryTest.kt` - Census of every component the app's source manifests export, and the permission each one demands of its caller.
   - `ExportedEntryExtrasGuardTest.kt` - Every component exported **without a permission** reads its caller's extras only inside a function that catches `RuntimeException`.
+  - `FdroidSigningStripGuardTest.kt` - Pins the release signing assignment in `app/build.gradle.kts` to a shape F-Droid's build server removes whole.
   - `FirebaseIsolationKonsistTest.kt` - Konsist guard keeping the Firebase SDK out of the shared `main` source set.
   - `HitlDispatchKonsistTest.kt` - Census of the seams through which a tool call can take effect, and of the one channel through which a human answer can reach the gate in front of them.
   - `ImageAttachmentEntryCensusTest.kt` - Census of the production files that start runs through `AgentOrchestratorUseCase`, with whether each can attach an image — and, if it can, proof that it asks the multimodal pre-flight (`CheckImageAttachmentUseCase`) first.

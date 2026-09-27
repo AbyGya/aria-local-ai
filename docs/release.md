@@ -665,12 +665,19 @@ JDK vendor, have all 277 entries CRC-identical. Before these changes, the
 published 0.10.1 APK and a local build of its commit differed in 5 of 278
 entries (`classes.dex`, the baseline profile and three native libraries).
 
-What this does *not* establish is that the whole artefact reproduces
-bit-for-bit on F-Droid's own server, which has not built it yet.
+F-Droid's own server has since built 0.11.0 from its tag and matched the
+published `foss` APK. The app is submitted there as a reproducible build: F-Droid
+builds each tag, compares its build with `knotwork-<version>-foss-release.apk`
+from the GitHub release, and publishes that APK, signed with this project's key.
+A tag whose APK it cannot reproduce is not published on F-Droid at all.
 
-The `foss` release is otherwise a standard R8-minified arm64-v8a build (§4); the
-F-Droid build recipe should disable any signing config so F-Droid applies its
-own signature.
+F-Droid strips signing configuration from the build script before it builds, so
+its build comes out unsigned. The stripper deletes a `signingConfig = <token>`
+line and nothing else, which is why the release build type chooses its signing
+config in one statement and assigns it, as a single name, in the next;
+`FdroidSigningStripGuardTest` fails the build if that shape changes.
+
+The `foss` release is otherwise a standard R8-minified arm64-v8a build (§4).
 
 ## 9. Cutting a release
 
@@ -739,7 +746,13 @@ Gradle invocation, so the Google plugins stay out of it (§8) — `fossRelease`
 (APK), checks that both APKs ship the LiteRT-LM and MediaPipe Tasks libraries and
 not MediaPipe's excluded text-generation one (§5), re-verifies the signer of all
 three artefacts against `RELEASE_CERT_SHA256`, and attaches them plus a `SHA256SUMS.txt` to a **draft**
-GitHub Release. The R8 mapping files are uploaded as a workflow artefact (90-day
+GitHub Release.
+
+The name of the `foss` asset, `knotwork-<version>-foss-release.apk`, is part of
+the F-Droid build (§8): F-Droid downloads the APK by that name to check its own
+build against it. Rename it and F-Droid stops publishing new versions. A draft's
+assets cannot be downloaded, so F-Droid's check fails until the release is
+published. The R8 mapping files are uploaded as a workflow artefact (90-day
 retention) rather than as a public asset — they belong with the maintainer, for
 deobfuscating crash reports.
 

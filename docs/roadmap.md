@@ -75,14 +75,11 @@ That settles the first half of this item: a store listing exists, and so
 does a data-safety declaration matching the privacy model the app
 actually implements. What is left is the second channel.
 
-- **F-Droid.** The `foss` flavour exists precisely so the app can be
-  built without proprietary telemetry, and the audience this project is
-  written for largely installs from there. The open question is not the
-  build but the inclusion policy: the on-device inference engine ships as
-  a prebuilt native library, and whether that is acceptable has to be
-  settled before an RFP is worth filing. A reproducible build (a pinned
-  `SOURCE_DATE_EPOCH`) is the other piece. If the policy answer is no,
-  the fallback under consideration is a project-run F-Droid repository.
+- **F-Droid.** Submitted, waiting for review. F-Droid builds the `foss`
+  APK from source and publishes it only if it matches the one on GitHub
+  Releases, so both carry the same signature and you can switch between
+  them without reinstalling. The open question is the reviewers': the
+  on-device inference engine ships as a prebuilt native library.
 
 Note the one-time migration cost described in the *Pre-release notice* of
 [README.md](../README.md): `0.7.0` is the first release-signed build, so
