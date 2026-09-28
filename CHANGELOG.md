@@ -25,6 +25,23 @@ details.
   only by chance. The statement is now split so that F-Droid removes the whole
   assignment, and a test fails the build if that shape changes.
 
+### Fixed
+
+- **README said the Play build and the release APKs share a signing key; they
+  do not.** Google Play signs the copies it delivers with its own key, so
+  Android refuses to install a release APK over a Play install, and the other
+  way round. Switching channels means uninstalling first, which deletes the
+  app's local data; export what you want to keep before you do. The release
+  guide now lists which key signs each channel, and the in-app troubleshooting
+  page covers the install error. The release guide also claimed Google Play
+  rotates its key with every release; it keeps the same key.
+- **The release guide named the wrong certificate for the Firebase key's
+  Android restriction.** It pointed at the key Play Console shows, but a Play
+  install presents the key Play first signed the app with. From 25 to 27
+  September, Firebase refused requests from Play installs with crash reporting
+  on. The restriction is fixed, and the guide now reads the fingerprint from an
+  installed copy.
+
 ## [0.11.0] - 2026-09-26
 
 ### Security

@@ -132,6 +132,20 @@ debug-signed builds, so an in-place upgrade from a debug-signed install will be
 rejected with a signature mismatch — see the *Pre-release notice* in
 [README.md](../README.md). Plan for a clean install at that transition.
 
+### Signing identities by channel
+
+| Channel         | Flavour        | Signed with |
+|-----------------|----------------|-------------|
+| GitHub Releases | `full`, `foss` | This project's release key. |
+| F-Droid (submitted, not yet published) | `foss` | This project's release key. F-Droid publishes the APK from the GitHub release once its own build reproduces it (§8 *Reproducible builds*). |
+| Google Play     | `full`         | Keys Google Play holds, not this project's. The AAB uploaded to Play is signed with the release key, which Play records as the upload key; Play re-signs the APKs it delivers. |
+
+Android updates an installed app only with a copy from the same signer. So the
+GitHub APKs and F-Droid update each other in place, and so do the two GitHub
+flavours. Between Google Play and either of them there is no update path:
+switching means uninstalling first, which deletes the app's local data — see
+[troubleshooting.md](troubleshooting.md#installing-over-a-copy-from-google-play-fails).
+
 ### Generating the release keystore
 
 The keystore is created **outside VCS** on the maintainer's machine:
@@ -162,9 +176,12 @@ RELEASE_KEY_ALIAS=agent-release
 RELEASE_KEY_PASSWORD=••••••
 ```
 
-The Play Store also requires App Signing by Google Play — upload the keystore
-once during the first release, then Play Store rotates the in-app signing
-certificate on every subsequent release.
+Google Play re-signs what it distributes. The AAB uploaded to Play is signed
+with the release key, which Play Console records as the upload key; the APKs
+Play delivers are signed with keys Play holds. They do not change from one
+release to the next — replacing them is a separate key upgrade in Play Console.
+Which channel carries which key is set out in *Signing identities by channel*
+above.
 
 ### Provisioning the keystore in CI
 
@@ -256,12 +273,27 @@ signing setup changes:
 
 - **API restrictions.** The Android key allows only the APIs the app calls. Crash
   reporting needs the *Firebase Installations API* alone.
-- **Application restrictions.** *Android apps*, with the package paired with
-  **both** signing certificates' SHA-1: the Play App Signing key (Play Console →
-  *Setup* → *App signing*) and the release key that signs the GitHub APK (step 2
-  above, SHA-1 rather than SHA-256). With one pair missing, crash reporting stops
-  working on that channel and nothing else says so. Debug builds use the
-  committed placeholder file and are not affected.
+- **Application restrictions.** *Android apps*, with the package paired with the
+  SHA-1 of **both** certificates Firebase sees: the release key that signs the
+  GitHub APK (step 2 above, SHA-1 rather than SHA-256), and the key a Google
+  Play install is signed with. Take the second from a copy installed from Play,
+  not from Play Console. Firebase hashes the certificate Android reports for the
+  app — after a key rotation, the oldest one — and that is the key Play first
+  signed the app with, while Play Console's *Play app signing* page shows the
+  newer key Play uses for Android 17 and later. With one pair missing, Firebase
+  answers that channel's requests with 403 and nothing in the app says so; only
+  the API's metrics page shows it. Debug builds use the committed placeholder
+  file and are not affected.
+
+  ```bash
+  adb shell pm path app.knotwork.android   # several lines; pull base.apk
+  adb pull <path to base.apk> play-base.apk
+  apksigner verify --print-certs --min-sdk-version 24 --max-sdk-version 36 play-base.apk
+  ```
+
+  Keep `--max-sdk-version 36`: for Android 17 and later Play adds a post-quantum
+  signature, and an `apksigner` that cannot read it (`ML-DSA KeyFactory not
+  available`) reports the whole APK as not verified.
 - **Enabled products.** Nothing beyond Crashlytics.
 - **No other keys.** Firebase creates a *Browser key* with the project, for web
   apps; this project has none, so the key is unused and has been deleted. The
@@ -300,7 +332,8 @@ keytool -printcert -jarfile app/build/outputs/bundle/fullRelease/app-full-releas
 ```
 
 In both cases check that the printed SHA-256 fingerprint matches
-`RELEASE_CERT_SHA256` (and the one Play Console registered for the app). The
+`RELEASE_CERT_SHA256` (for an AAB, also the upload key certificate on Play
+Console's *Play app signing* page). The
 debug keystore prints `CN=Android Debug`, so the DN is the quickest way to spot
 an accidental fallback to debug signing.
 

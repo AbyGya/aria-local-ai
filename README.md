@@ -227,9 +227,13 @@ browser's `prefers-color-scheme`.
 [**Knotwork on Google Play**](https://play.google.com/store/apps/details?id=app.knotwork.android)
 — the simplest route, and the one that updates itself. Requires Android 14+.
 
-The Play build is the `full` flavour described below. It shares a signing key
-with the APKs on the Releases page, so you can move between those two channels
-without reinstalling.
+The Play build is the `full` flavour described below. Google Play signs the
+copies it delivers with its own key; the APKs on the Releases page carry this
+project's key. Android will not update one with the other, so moving between
+Google Play and a release APK means exporting what you want to keep,
+uninstalling, and installing from the other channel. Which channel is signed by
+which key is set out in
+[docs/release.md](docs/release.md#signing-identities-by-channel).
 
 ### From a release build
 
@@ -396,8 +400,8 @@ experimentation. Expect rough edges:
   Android **refuses to update an install in place when the signer changes**
   (signature mismatch), so upgrading from `0.6.0` or earlier means uninstalling
   the old build first — which clears its local data. Export anything you want
-  to keep before you do. Releases from `0.7.0` onward share one signer and
-  update in place normally.
+  to keep before you do. Releases from `0.7.0` onward share one signer within
+  a channel and update in place normally.
 
 ## License
 
