@@ -24,6 +24,13 @@ details.
   two-line statement that picks the release key, and the other half compiled
   only by chance. The statement is now split so that F-Droid removes the whole
   assignment, and a test fails the build if that shape changes.
+- **Branch names, commit messages and pull request titles follow the
+  contributor guide.** The guide described `feature/<kebab-name>` branches and
+  seven commit types, while the project's own history carried internal planning
+  numbers in all three. New work drops them. The guide adds the `perf:` and
+  `release:` types, and `scanGitMetadataVocabulary` checks a branch, its
+  commits and a pull request's title against the rules the files already
+  follow. Earlier history is not rewritten.
 
 ### Fixed
 

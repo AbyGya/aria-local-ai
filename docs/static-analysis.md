@@ -1570,6 +1570,14 @@ Deliberate exclusions:
 - **`buildSrc/src/test`** — the scanner's fixtures must spell the forbidden forms.
 - **`app/src/main/assets/docs`** — a generated copy of `docs/`, which is scanned
   at its source rather than twice.
+- **Git metadata** — branch names, commit messages and pull request titles.
+  They are not files, and a gate that decides the build has to be a function of
+  the tree. The early history carries the internal numbering and is not
+  rewritten: tags, releases and the F-Droid recipe point at commits by hash. New
+  work follows the convention in `CONTRIBUTING.md`, and
+  `scanGitMetadataVocabulary` (below) checks it on demand. The integration
+  branch named there is not an exception to that convention: it is the one
+  number a reader can look up.
 
 **Not forbidden, on purpose:** the lower-case hyphenated project codename that
 names the Gradle root project and the Firebase project. Neither is visible to a
@@ -1603,6 +1611,34 @@ editor. All were rewritten to say what the code does or what was observed,
 without the number. The gate was then observed failing again with the
 onboarding title string reverted to its pre-rename value. The pure logic is
 unit-tested in `buildSrc` (`ForbiddenVocabularyCheckerTest`).
+
+### Git metadata (`scanGitMetadataVocabulary`)
+
+`:app:scanGitMetadataVocabulary` runs the same rules over the git layer: the name
+of the checked-out branch, the full message of every commit in a range (merges
+included), and optionally a pull request's title and body. It is not part of
+`check` — its verdict depends on the state of git, not on the tree — and runs
+before a pull request is opened or retitled:
+
+```bash
+./gradlew :app:scanGitMetadataVocabulary -PgitBase=main \
+    -Ptitle="docs: …" -PbodyFile=pr-body.md
+```
+
+The default range is `origin/<gitBase>..HEAD`; `-PgitRange=<a>..<b>` replaces it.
+
+One family is left out: the integration branch path. `CONTRIBUTING.md` names
+that branch, and merging it writes its path into the merge commit's subject, so
+reporting it would fail every such merge. In files it stays forbidden. The rule
+for a phase number also accepts an opening parenthesis before the digits — a
+commit type with the number as its scope, which is how integration merges used
+to be titled. No public file has that spelling, so the file gate reports nothing
+new.
+
+**Observed failing:** over `v0.10.1..v0.11.0` the scan reports 142 of 143
+commits; the one it passes is the release commit. The pure logic is unit-tested
+in `buildSrc` (`GitMetadataVocabularyTest`, which also runs the task's git
+commands against a temporary repository).
 
 ---
 
