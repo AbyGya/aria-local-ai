@@ -26,6 +26,7 @@ Three sibling documents, and it is worth knowing which one you want:
 - [A trigger didn't fire](#a-trigger-didnt-fire)
 - [Memory search isn't finding an obvious entry](#memory-search-isnt-finding-an-obvious-entry)
 - ["Your data can't be unlocked" appears at startup](#your-data-cant-be-unlocked-appears-at-startup)
+- [Installing over a copy from Google Play fails](#installing-over-a-copy-from-google-play-fails)
 
 ---
 
@@ -247,6 +248,30 @@ and the app shows a dedicated recovery screen instead of starting:
 The app never deletes or re-keys your data automatically in this state:
 without the original key the database contents cannot be recovered, so
 the decision to wipe is always yours.
+
+## Installing over a copy from Google Play fails
+
+Installing a release APK from GitHub on a device that already has Knotwork
+from Google Play stops with an error such as *App not installed* or *package
+conflicts with an existing package*; the wording depends on the Android version
+and on the app doing the install. It fails the other way round too: a copy
+installed from a release APK cannot be updated from Google Play.
+
+Neither file is broken. Google Play and the GitHub releases sign the app with
+different keys ([Signing identities by
+channel](release.md#signing-identities-by-channel)), and Android updates an app
+only with a copy from the same signer. To switch channels:
+
+1. Export what you want to keep:
+   [chats](user-guide.md#exporting-and-importing-chat-history),
+   [memory](user-guide.md#exporting-memory), your own
+   [pipelines](user-guide.md#managing-presets) and
+   [prompts](user-guide.md#importing-and-exporting-a-prompt).
+2. Uninstall the app. That deletes everything it keeps on the device,
+   including downloaded models, settings and saved API keys, which have no
+   export.
+3. Install from the other channel, download a model, set up your settings and
+   keys again, and import the files.
 
 
 ---

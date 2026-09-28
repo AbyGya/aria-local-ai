@@ -75,8 +75,8 @@ object DocumentationLinks {
             path = "docs/troubleshooting.md",
             anchor = null,
             delivery = Delivery.BUNDLED,
-            lineCount = 259,
-            sectionCount = 11,
+            lineCount = 284,
+            sectionCount = 12,
         ),
         Entry(
             id = ID_FAQ,
