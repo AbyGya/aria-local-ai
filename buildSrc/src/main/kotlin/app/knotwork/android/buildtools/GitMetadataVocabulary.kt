@@ -31,7 +31,7 @@ object GitMetadataVocabulary {
     /** Separates a commit's hash from its message in [logCommand] output. */
     private val FIELD_SEPARATOR = Char(0x1F)
 
-    /** Ends each commit in [logCommand] output; messages never contain it. */
+    /** Ends each commit in [logCommand] output: a control character commit messages do not use. */
     private val RECORD_SEPARATOR = Char(0x1E)
 
     /** Characters of a commit hash used to label its message in a violation. */
@@ -101,12 +101,17 @@ object GitMetadataVocabulary {
      * @param title Pull request title, when the caller has one.
      * @param body Pull request body, when the caller has one.
      * @return Every violation, labelled [BRANCH_LABEL], `commit <hash prefix>`,
-     *   [TITLE_LABEL] or [BODY_LABEL], with the line inside that text.
+     *   [TITLE_LABEL] or [BODY_LABEL], with the line inside that text. A commit
+     *   whose prefix is already taken by another is labelled with its full hash,
+     *   so a shared prefix never drops a message from the scan.
      */
     fun scan(branch: String?, commits: List<Commit>, title: String?, body: String?): List<Violation> {
         val texts = buildMap {
             branch?.trim()?.takeIf { it.isNotEmpty() && it != "HEAD" }?.let { put(BRANCH_LABEL, it) }
-            commits.forEach { put("commit ${it.hash.take(HASH_LABEL_LENGTH)}", it.message) }
+            commits.forEach { commit ->
+                val short = "commit ${commit.hash.take(HASH_LABEL_LENGTH)}"
+                put(if (short in this) "commit ${commit.hash}" else short, commit.message)
+            }
             title?.let { put(TITLE_LABEL, it) }
             body?.let { put(BODY_LABEL, it) }
         }

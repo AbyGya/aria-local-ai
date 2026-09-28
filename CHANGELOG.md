@@ -29,8 +29,8 @@ details.
   seven commit types, while the project's own history carried internal planning
   numbers in all three. New work drops them. The guide adds the `perf:` and
   `release:` types, and `scanGitMetadataVocabulary` checks a branch, its
-  commits and a pull request's title against the rules the files already
-  follow. Earlier history is not rewritten.
+  commits and a pull request's title and body against the rules the files
+  already follow. Earlier history is not rewritten.
 
 ### Fixed
 

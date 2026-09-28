@@ -93,6 +93,19 @@ class GitMetadataVocabularyTest {
     }
 
     @Test
+    fun `given two commits sharing a hash prefix when scanned then both messages are reported`() {
+        val commits = listOf(
+            Commit("0123456700000000", "feat(phase45-1): first"),
+            Commit("0123456711111111", "feat(phase45-2): second"),
+        )
+
+        assertEquals(
+            listOf("commit 01234567", "commit 0123456711111111"),
+            GitMetadataVocabulary.scan(null, commits, null, null).map { it.file },
+        )
+    }
+
+    @Test
     fun `given a title and body when scanned then each is reported under its own label`() {
         val violations = GitMetadataVocabulary.scan(
             branch = null,
