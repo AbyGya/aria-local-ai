@@ -88,7 +88,7 @@ class ForbiddenVocabularyCheckerTest {
             "c.kt" to "fun `given pre-Phase21 node when decode`() = Unit\n",
             "d.html" to "* exported in PHASE 16 — 4/5.\n",
             "e.kt" to "// the duplication task 2/11 removed\n",
-            "f.yml" to "branches: [phase/43]\n",
+            "f.txt" to "phase(44): close the audit's findings\n",
         )
 
         val violations = ForbiddenVocabularyChecker.scan(files)
@@ -101,10 +101,30 @@ class ForbiddenVocabularyCheckerTest {
                 "c.kt:1 Phase21",
                 "d.html:1 PHASE 16",
                 "e.kt:1 task 2/11",
-                "f.yml:1 phase/43",
+                "f.txt:1 phase(44",
             ),
             violations.map { "${it.file}:${it.line} ${it.token}" },
         )
+    }
+
+    @Test
+    fun `given a phase branch path when scanned then flagged as integration branch path`() {
+        val violations = ForbiddenVocabularyChecker.scan(mapOf("f.yml" to "branches: [phase/43]\n"))
+
+        assertEquals(listOf("f.yml:1 phase/43"), violations.map { "${it.file}:${it.line} ${it.token}" })
+        assertEquals(Family.INTEGRATION_BRANCH_PATH, violations.single().family)
+    }
+
+    @Test
+    fun `given families without the branch path when scanned then only the branch path passes`() {
+        val files = mapOf("m.txt" to "Merge pull request #7 from o/phase/43\n\nfeat(phase43-2): x\n")
+
+        val violations = ForbiddenVocabularyChecker.scan(
+            files,
+            families = setOf(Family.RETIRED_PRODUCT_NAME, Family.INTERNAL_PLANNING_NUMBER),
+        )
+
+        assertEquals(listOf("m.txt:3 phase43"), violations.map { "${it.file}:${it.line} ${it.token}" })
     }
 
     @Test

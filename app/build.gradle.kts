@@ -18,6 +18,7 @@ import app.knotwork.android.buildtools.PinnedNdk
 import app.knotwork.android.buildtools.R8MappingChecker
 import app.knotwork.android.buildtools.ReleaseVersionChecker
 import app.knotwork.android.buildtools.ReportExternalDocLinksTask
+import app.knotwork.android.buildtools.ScanGitMetadataVocabularyTask
 import app.knotwork.android.buildtools.SettingsHelpDocsGenerator
 import app.knotwork.android.buildtools.StoreListingLengthChecker
 import app.knotwork.android.buildtools.SyncBundledDocsTask
@@ -1048,6 +1049,23 @@ val verifyForbiddenVocabulary by tasks.registering(VerifyForbiddenVocabularyTask
     stampFile.set(layout.buildDirectory.file("reports/vocabulary/verified.txt"))
 }
 tasks.named("check") { dependsOn(verifyForbiddenVocabulary) }
+
+// The same rules over the git layer — branch name, commit messages, a pull
+// request's title and body. Deliberately NOT a dependency of `check`: its verdict
+// is a function of git state, not of the tree. Run before opening or retitling a
+// pull request:
+//   ./gradlew :app:scanGitMetadataVocabulary [-PgitBase=main | -PgitRange=<a>..<b>] \
+//       [-Ptitle="<title>"] [-PbodyFile=<path>]
+val scanGitMetadataVocabulary by tasks.registering(ScanGitMetadataVocabularyTask::class) {
+    group = "verification"
+    description = "Fails if the branch name, a commit message or a pull request title/body carries " +
+        "forbidden vocabulary."
+    repositoryRoot.set(rootProject.layout.projectDirectory)
+    gitBase.set(providers.gradleProperty("gitBase").orElse("main"))
+    gitRange.set(providers.gradleProperty("gitRange"))
+    pullRequestTitle.set(providers.gradleProperty("title"))
+    pullRequestBodyFile.set(providers.gradleProperty("bodyFile"))
+}
 
 // Dialog inventory gate.
 //

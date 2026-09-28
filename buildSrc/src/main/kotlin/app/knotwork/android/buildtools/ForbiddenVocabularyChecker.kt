@@ -21,9 +21,16 @@ package app.knotwork.android.buildtools
  *     spelling, so the hyphenated, lower-case and run-together spellings it
  *     missed kept accumulating in KDoc behind a grep that reported zero.
  *
+ * The branch path is reported as a family of its own
+ * ([Family.INTEGRATION_BRANCH_PATH]) because the two callers disagree about it:
+ * in a file it is planning vocabulary like the rest, while in git metadata it is
+ * the one number with a public referent (see [Family.INTEGRATION_BRANCH_PATH]).
+ *
  * The scanner is a pure `Map<path, content> -> List<Violation>` transform with
- * no file-system access, so it is unit-tested directly; the Gradle task
- * ([VerifyForbiddenVocabularyTask]) resolves the file set and feeds it here.
+ * no file-system access, so it is unit-tested directly; the Gradle tasks
+ * ([VerifyForbiddenVocabularyTask] over files, [ScanGitMetadataVocabularyTask]
+ * over branch names, commit messages and a pull request's title and body)
+ * resolve their input and feed it here.
  *
  * **Scope decisions that belong to the caller**, recorded so they are not
  * reopened: `CHANGELOG.md` is excluded, because its past entries name the
@@ -53,8 +60,18 @@ object ForbiddenVocabularyChecker {
         /** A spelling of the product name the app carried before its rename. */
         RETIRED_PRODUCT_NAME("retired product name"),
 
-        /** A phase number, task fraction or phase branch path from internal planning. */
+        /** A phase number or task fraction from internal planning. */
         INTERNAL_PLANNING_NUMBER("internal planning number"),
+
+        /**
+         * The path of an integration branch: the branch prefix followed by its number.
+         *
+         * Forbidden in files like any planning number. Git metadata is the exception:
+         * `CONTRIBUTING.md` names the integration branch to contributors, and merging
+         * one writes its path into the merge commit's subject, so the git-metadata
+         * scan leaves this family out rather than failing every such merge.
+         */
+        INTEGRATION_BRANCH_PATH("integration branch path"),
     }
 
     /**
@@ -100,8 +117,10 @@ object ForbiddenVocabularyChecker {
      * - The older title-case descriptor is case-sensitive on purpose: the
      *   lower-case "on-device AI agent" is the current tagline and must pass.
      * - The retired root package is matched with dots escaped.
-     * - Phase numbers accept a space, a hyphen or nothing before the digits
-     *   (all three spellings existed in the source), and require two digits.
+     * - Phase numbers accept a space, a hyphen, an opening parenthesis or nothing
+     *   before the digits, and require two digits. The first three spellings
+     *   existed in the source; the parenthesis is a commit type written with the
+     *   number as its scope, which is how integration merges used to be titled.
      */
     private val RULES: List<Pair<Regex, Family>> = listOf(
         Regex(
@@ -111,9 +130,9 @@ object ForbiddenVocabularyChecker {
         Regex(PLATFORM_WORD + AI_WORD + AGENT_WORD) to Family.RETIRED_PRODUCT_NAME,
         Regex("\\bOn-Device$WORD_GAP$AI_WORD$WORD_GAP$AGENT_WORD\\b") to Family.RETIRED_PRODUCT_NAME,
         Regex("\\b" + "ai" + "\\." + "agent" + "\\." + "android" + "\\b") to Family.RETIRED_PRODUCT_NAME,
-        Regex("\\b" + "pha" + "se" + "[ \\t-]?\\d{2,}", RegexOption.IGNORE_CASE) to Family.INTERNAL_PLANNING_NUMBER,
+        Regex("\\b" + "pha" + "se" + "[ \\t(-]?\\d{2,}", RegexOption.IGNORE_CASE) to Family.INTERNAL_PLANNING_NUMBER,
         Regex("\\b" + "ta" + "sk" + "[ \\t]+\\d+/\\d+", RegexOption.IGNORE_CASE) to Family.INTERNAL_PLANNING_NUMBER,
-        Regex("\\b" + "pha" + "se" + "/\\d+", RegexOption.IGNORE_CASE) to Family.INTERNAL_PLANNING_NUMBER,
+        Regex("\\b" + "pha" + "se" + "/\\d+", RegexOption.IGNORE_CASE) to Family.INTEGRATION_BRANCH_PATH,
     )
 
     /**
@@ -125,19 +144,24 @@ object ForbiddenVocabularyChecker {
     private val TOKEN_GAP = Regex("[ \\t]*\\n[\\s*/#>]*")
 
     /**
-     * Scans the supplied files for both families.
+     * Scans the supplied texts for the requested families.
      *
-     * @param files Map of repository-root-relative path to full file content. The
-     *   caller restricts this to the public text contour and excludes
-     *   `CHANGELOG.md`.
+     * @param files Map of a label to full text. For the file scan the label is the
+     *   repository-root-relative path, and the caller restricts the map to the
+     *   public text contour and excludes `CHANGELOG.md`; the git-metadata scan
+     *   labels each branch name, commit message, title and body instead.
+     * @param families Families to report. Every family by default, which is what
+     *   the file scan uses; the git-metadata scan drops
+     *   [Family.INTEGRATION_BRANCH_PATH].
      * @return Every [Violation] found, ordered by file, then line, then family,
      *   so the failure message is stable and diff-friendly.
      */
-    fun scan(files: Map<String, String>): List<Violation> {
+    fun scan(files: Map<String, String>, families: Set<Family> = Family.entries.toSet()): List<Violation> {
         val violations = mutableListOf<Violation>()
+        val rules = RULES.filter { (_, family) -> family in families }
         for ((path, content) in files) {
             val lineStarts = lineStartOffsets(content)
-            for ((regex, family) in RULES) {
+            for ((regex, family) in rules) {
                 regex.findAll(content).forEach { match ->
                     violations += Violation(
                         file = path,

@@ -194,10 +194,10 @@ long-lived branch before reaching `main`:
   work. Every commit on `main` is expected to pass `./gradlew check`.
 - Active development happens on integration branches named `phase/<N>`.
   Individual changes branch off the current integration branch as
-  `feature/<kebab-name>`, and their pull requests **target the open
-  `phase/<N>` branch**, not `main`. When the batch is complete, the
-  integration branch is merged into `main` with a merge commit and
-  deleted.
+  `feature/<kebab-name>` (or `fix/<kebab-name>` for a fix), and their pull
+  requests **target the open `phase/<N>` branch**, not `main`. When the
+  batch is complete, the integration branch is merged into `main` with a
+  merge commit and deleted.
 - If no `phase/<N>` branch is currently open (check the
   [branch list](https://github.com/alexeyw/knotwork/branches)),
   target `main` directly. When in doubt, open the PR against `main` —
@@ -219,11 +219,18 @@ following prefixes are accepted:
 | `test:`      | Adding or correcting tests, no production change.          |
 | `refactor:`  | Internal restructuring with no behaviour change.           |
 | `build:`     | Build system, CI config, dependency or toolchain change.   |
+| `perf:`      | Faster or smaller, with no change in behaviour.            |
+| `release:`   | Cutting a version: version bump and changelog heading.     |
 
 Guidelines:
 
 - Keep the subject line in imperative mood (`add`, `fix`, `remove`) and
   under 72 characters.
+- An optional scope names the area of the code: `fix(memory): …`,
+  `docs(privacy): …`.
+- Branch names, commit messages and pull request titles are public text, held
+  to the same vocabulary rules as the files;
+  `./gradlew :app:scanGitMetadataVocabulary` checks your branch against them.
 - Reference an issue in the body or footer with `Closes #N` (auto-close
   on merge) or `Refs #N`.
 - Squash trivial fixups before opening the PR.
