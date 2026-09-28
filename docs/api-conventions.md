@@ -23,6 +23,13 @@ layering rationale, see [`architecture.md`](architecture.md).
   foreground service's `onDestroy()` to prevent OOM.
 - Gate every inference call with a `Mutex` to prevent concurrent session
   access.
+- **Never close a `Conversation` while its native work is running.** On an
+  early stop, call `cancelProcess()` and wait for `onDone` / `onError` from
+  the callback overload of `sendMessageAsync` before `close()`. Repeat the
+  cancel while waiting: a decode task started after the first cancel does
+  not see it. The Flow overload cannot report that native work has ended
+  once its collector is gone. Closing earlier crashes the process inside
+  LiteRT-LM.
 - Log memory usage before and after model load with `Timber.d`.
 
 ```kotlin

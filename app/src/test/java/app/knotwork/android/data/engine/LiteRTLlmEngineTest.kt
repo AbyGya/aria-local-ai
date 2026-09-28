@@ -8,22 +8,33 @@ import app.knotwork.android.domain.repositories.SettingsRepository
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.LiteRtLmJniException
+import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.MessageCallback
+import io.mockk.Runs
 import io.mockk.coVerify
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
 import io.mockk.mockkConstructor
 import io.mockk.slot
 import io.mockk.unmockkAll
 import io.mockk.verify
+import io.mockk.verifyOrder
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -64,7 +75,7 @@ class LiteRTLlmEngineTest {
         every { anyConstructed<Engine>().initialize() } returns Unit
         every { anyConstructed<Engine>().close() } returns Unit
 
-        engine = LiteRTLlmEngine(context, settingsRepository, appScope)
+        engine = LiteRTLlmEngine(context, settingsRepository, appScope, Dispatchers.IO)
     }
 
     @After
@@ -146,7 +157,7 @@ class LiteRTLlmEngineTest {
         every { settingsRepository.topP } returns flowOf(0.55f)
         val captured = slot<ConversationConfig>()
         val conversation = mockk<Conversation>(relaxed = true)
-        every { conversation.sendMessageAsync(any<String>()) } returns emptyFlow()
+        completesAtOnce(conversation)
         every { anyConstructed<Engine>().createConversation(capture(captured)) } returns conversation
         engine.initialize(tempFile.absolutePath)
 
@@ -170,7 +181,7 @@ class LiteRTLlmEngineTest {
         every { settingsRepository.topP } returns flowOf(0.9f)
         val captured = mutableListOf<ConversationConfig>()
         val conversation = mockk<Conversation>(relaxed = true)
-        every { conversation.sendMessageAsync(any<String>()) } returns emptyFlow()
+        completesAtOnce(conversation)
         every { anyConstructed<Engine>().createConversation(capture(captured)) } returns conversation
         engine.initialize(tempFile.absolutePath)
 
@@ -197,7 +208,7 @@ class LiteRTLlmEngineTest {
         every { settingsRepository.topP } returns flowOf(0.55f)
         val captured = slot<ConversationConfig>()
         val conversation = mockk<Conversation>(relaxed = true)
-        every { conversation.sendMessageAsync(any<String>()) } returns emptyFlow()
+        completesAtOnce(conversation)
         every { anyConstructed<Engine>().createConversation(capture(captured)) } returns conversation
         engine.initialize(tempFile.absolutePath)
 
@@ -246,7 +257,7 @@ class LiteRTLlmEngineTest {
         // order: trim first, reload second, unload delivered last.
         val queued = StandardTestDispatcher(testScheduler)
         val deferredScope = CoroutineScope(queued)
-        val subject = LiteRTLlmEngine(context, settingsRepository, deferredScope)
+        val subject = LiteRTLlmEngine(context, settingsRepository, deferredScope, Dispatchers.IO)
 
         subject.initialize(tempFile.absolutePath)
         subject.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_BACKGROUND)
@@ -345,9 +356,232 @@ class LiteRTLlmEngineTest {
         assertEquals(null, engine.activeBackend)
     }
 
+    @Test
+    fun `given native work in flight when the generation is cancelled then close waits for the native side to end`() =
+        runTest {
+            val native = NativeStub()
+            val subject = loadedSubject(native, StandardTestDispatcher(testScheduler))
+            native.endingAfter {
+                val collection = launch { subject.generateResponseStream("Hello").collect {} }
+                runCurrent()
+
+                // The Stop button lands while the model is still reading the prompt.
+                collection.cancel()
+                runCurrent()
+
+                // Closing now is the crash: LiteRT-LM nulls the session inside the
+                // Conversation's destructor while the prefill callback is still due
+                // to dereference it. The work has to be cancelled and seen to end.
+                verify { native.conversation.cancelProcess() }
+                verify(exactly = 0) { native.conversation.close() }
+
+                native.end()
+                advanceUntilIdle()
+
+                verifyOrder {
+                    native.conversation.cancelProcess()
+                    native.conversation.close()
+                }
+            }
+        }
+
+    @Test
+    fun `given the native side keeps running after a cancel when waiting then the cancel is repeated until it ends`() =
+        runTest {
+            val native = NativeStub()
+            val subject = loadedSubject(native, StandardTestDispatcher(testScheduler))
+            native.endingAfter {
+                val collection = launch { subject.generateResponseStream("Hello").collect {} }
+                runCurrent()
+
+                collection.cancel()
+                runCurrent()
+                // A prefill that finished just before the cancel still starts a decode
+                // task, and LiteRT-LM gives every new task a fresh cancel flag — the
+                // first cancel never reaches it.
+                advanceTimeBy(ONE_SECOND_MS)
+                runCurrent()
+
+                verify(atLeast = 2) { native.conversation.cancelProcess() }
+                verify(exactly = 0) { native.conversation.close() }
+
+                native.end()
+                advanceUntilIdle()
+
+                verify(exactly = 1) { native.conversation.close() }
+            }
+        }
+
+    @Test
+    fun `given a generation that ends normally when it completes then the conversation is closed without a cancel`() =
+        runTest {
+            val native = NativeStub()
+            every { native.conversation.sendMessageAsync(any<String>(), any<MessageCallback>()) } answers {
+                val callback = secondArg<MessageCallback>()
+                callback.onMessage(Message.model("Hi"))
+                callback.onDone()
+            }
+            val subject = loadedSubject(native, StandardTestDispatcher(testScheduler))
+
+            val chunks = subject.generateResponseStream("Hello").toList()
+
+            assertEquals(listOf("Hi"), chunks)
+            verify(exactly = 0) { native.conversation.cancelProcess() }
+            verify(exactly = 1) { native.conversation.close() }
+        }
+
+    @Test
+    fun `given the message is refused synchronously when streaming then the conversation is closed at once`() =
+        runTest {
+            val native = NativeStub()
+            every { native.conversation.sendMessageAsync(any<String>(), any<MessageCallback>()) } throws
+                LiteRtLmJniException("Failed to start nativeSendMessageAsync")
+            val subject = loadedSubject(native, StandardTestDispatcher(testScheduler))
+
+            val failure = failureOf { subject.generateResponseStream("Hello").toList() }
+
+            // Nothing native was started, so there is nothing to wait for — the
+            // close must not sit behind a cancel loop that no callback will end.
+            assertTrue(failure is LiteRtLmJniException)
+            verify(exactly = 0) { native.conversation.cancelProcess() }
+            verify(exactly = 1) { native.conversation.close() }
+        }
+
+    @Test
+    fun `given the native side reports an error mid-stream when collecting then the error reaches the caller`() =
+        runTest {
+            val native = NativeStub()
+            every { native.conversation.sendMessageAsync(any<String>(), any<MessageCallback>()) } answers {
+                secondArg<MessageCallback>().onError(LiteRtLmJniException("Native error 13: decode failed"))
+            }
+            val subject = loadedSubject(native, StandardTestDispatcher(testScheduler))
+
+            val failure = failureOf { subject.generateResponseStream("Hello").toList() }
+
+            assertTrue(failure is LiteRtLmJniException)
+            verify(exactly = 0) { native.conversation.cancelProcess() }
+            verify(exactly = 1) { native.conversation.close() }
+        }
+
+    @Test
+    fun `given a generation in flight when memory pressure unloads then teardown waits for the native side`() =
+        runTest {
+            val native = NativeStub()
+            val dispatcher = StandardTestDispatcher(testScheduler)
+            val subject = loadedSubject(native, dispatcher, CoroutineScope(dispatcher))
+            native.endingAfter {
+                launch { subject.generateResponseStream("Hello").collect {} }
+                runCurrent()
+
+                subject.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_MODERATE)
+                runCurrent()
+
+                // The unload queues behind the generation, and the generation will not
+                // let go while the native side is still running.
+                verify(exactly = 0) { native.conversation.close() }
+                verify(exactly = 0) { anyConstructed<Engine>().close() }
+
+                native.end()
+                advanceUntilIdle()
+
+                verifyOrder {
+                    native.conversation.cancelProcess()
+                    native.conversation.close()
+                    anyConstructed<Engine>().close()
+                }
+            }
+        }
+
     /** Reflective handle on the engine's private in-flight generation job. */
     private fun activeGenerationJob() = LiteRTLlmEngine::class.java.getDeclaredField("activeGenerationJob")
         .apply { isAccessible = true }
+
+    /**
+     * Runs [block] and returns the [LiteRtLmJniException] it threw, or `null`.
+     *
+     * @param block The generation to run.
+     * @return The native failure, or `null` when [block] completed.
+     */
+    private suspend fun failureOf(block: suspend () -> Unit): LiteRtLmJniException? = try {
+        block()
+        null
+    } catch (e: LiteRtLmJniException) {
+        e
+    }
+
+    /** Stubs [conversation] so every message ends at once with `onDone`. */
+    private fun completesAtOnce(conversation: Conversation) {
+        every { conversation.sendMessageAsync(any<String>(), any<MessageCallback>()) } answers {
+            secondArg<MessageCallback>().onDone()
+        }
+    }
+
+    /**
+     * Builds an engine on [dispatcher] with a model loaded and [native]'s
+     * conversation behind it.
+     *
+     * @param native The conversation stub every generation receives.
+     * @param dispatcher The dispatcher the generation stream runs on.
+     * @param scope The application scope, for tests that drive an unload.
+     * @return The loaded engine.
+     */
+    private suspend fun loadedSubject(
+        native: NativeStub,
+        dispatcher: CoroutineDispatcher,
+        scope: CoroutineScope = appScope,
+    ): LiteRTLlmEngine {
+        val tempFile = File.createTempFile("model", ".tflite")
+        tempFile.deleteOnExit()
+        every { settingsRepository.temperature } returns flowOf(0.7f)
+        every { settingsRepository.topK } returns flowOf(40)
+        every { settingsRepository.topP } returns flowOf(0.9f)
+        every { anyConstructed<Engine>().createConversation(any()) } returns native.conversation
+        return LiteRTLlmEngine(context, settingsRepository, scope, dispatcher).also {
+            it.initialize(tempFile.absolutePath)
+        }
+    }
+
+    /**
+     * A conversation whose native side never answers on its own: the message is
+     * accepted and its [MessageCallback] captured, so the test decides when the
+     * native work ends.
+     */
+    private class NativeStub {
+        /** The mocked LiteRT-LM conversation. */
+        val conversation: Conversation = mockk(relaxed = true)
+
+        private val captured = slot<MessageCallback>()
+
+        init {
+            every { conversation.sendMessageAsync(any<String>(), capture(captured)) } just Runs
+        }
+
+        /**
+         * Delivers the terminal callback LiteRT-LM sends for a cancelled task, if
+         * a message was sent. Safe to repeat: the engine ignores every terminal
+         * callback after the first.
+         */
+        fun end() {
+            if (captured.isCaptured) {
+                captured.captured.onError(CancellationException("Task cancelled"))
+            }
+        }
+
+        /**
+         * Runs [block], then [end]s the native work whatever happened. A failed
+         * assertion then fails the test instead of leaving the engine waiting on
+         * a native side nobody will end, which would hang the whole test run.
+         *
+         * @param block The test body.
+         */
+        inline fun endingAfter(block: () -> Unit) {
+            try {
+                block()
+            } finally {
+                end()
+            }
+        }
+    }
 
     private companion object {
         /** Float-to-double widening slack for the sampler assertions. */
@@ -355,5 +589,8 @@ class LiteRTLlmEngineTest {
 
         /** Generations sampled when asserting the seed varies. */
         const val SEED_SAMPLE_SIZE = 10
+
+        /** Virtual time comfortably past one re-cancel interval. */
+        const val ONE_SECOND_MS = 1_000L
     }
 }
