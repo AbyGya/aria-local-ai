@@ -5,6 +5,7 @@ import android.content.Context
 import app.knotwork.android.domain.models.LocalBackend
 import app.knotwork.android.domain.models.Result
 import app.knotwork.android.domain.repositories.SettingsRepository
+import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
@@ -496,6 +497,47 @@ class LiteRTLlmEngineTest {
     private fun activeGenerationJob() = LiteRTLlmEngine::class.java.getDeclaredField("activeGenerationJob")
         .apply { isAccessible = true }
 
+    @Test
+    fun `given an image when generating then the multimodal message is streamed through the callback`() = runTest {
+        val native = NativeStub()
+        answersContentsWith(native.conversation, "A cat")
+        val subject = loadedSubject(native, StandardTestDispatcher(testScheduler))
+
+        val chunks = subject.generateResponseStream("Describe it", imagePath = "/cache/images/cat.png").toList()
+
+        // The Flow overload would compile here too — the lambda's result is
+        // discarded — and would never send the message at all, leaving the
+        // stream waiting forever. Only the callback overload reaches the model.
+        assertEquals(listOf("A cat"), chunks)
+        verify(exactly = 1) { native.conversation.close() }
+    }
+
+    @Test
+    fun `given an audio clip when transcribing then the message is streamed through the callback`() = runTest {
+        val native = NativeStub()
+        answersContentsWith(native.conversation, "Hello there")
+        val subject = loadedSubject(native, StandardTestDispatcher(testScheduler))
+
+        val chunks = subject.transcribe("/cache/audio/clip.wav", "Transcribe this").toList()
+
+        assertEquals(listOf("Hello there"), chunks)
+        verify(exactly = 1) { native.conversation.close() }
+    }
+
+    /**
+     * Stubs the multimodal overload of [conversation] to answer [text] and end.
+     *
+     * @param conversation The mocked conversation.
+     * @param text The single response chunk.
+     */
+    private fun answersContentsWith(conversation: Conversation, text: String) {
+        every { conversation.sendMessageAsync(any<Contents>(), any<MessageCallback>()) } answers {
+            val callback = secondArg<MessageCallback>()
+            callback.onMessage(Message.model(text))
+            callback.onDone()
+        }
+    }
+
     /**
      * Runs [block] and returns the [LiteRtLmJniException] it threw, or `null`.
      *
@@ -554,6 +596,12 @@ class LiteRTLlmEngineTest {
 
         init {
             every { conversation.sendMessageAsync(any<String>(), capture(captured)) } just Runs
+            // The Flow overloads cannot report that native work ended once the
+            // collector is gone, and a discarded Flow never sends the message at
+            // all. Using one is the regression, so it fails loudly here instead
+            // of leaving the engine waiting for a callback that never comes.
+            every { conversation.sendMessageAsync(any<String>()) } throws AssertionError(FLOW_OVERLOAD_USED)
+            every { conversation.sendMessageAsync(any<Contents>()) } throws AssertionError(FLOW_OVERLOAD_USED)
         }
 
         /**
@@ -592,5 +640,8 @@ class LiteRTLlmEngineTest {
 
         /** Virtual time comfortably past one re-cancel interval. */
         const val ONE_SECOND_MS = 1_000L
+
+        /** Failure raised when the engine sends through a Flow overload. */
+        const val FLOW_OVERLOAD_USED = "sendMessageAsync must use the MessageCallback overload"
     }
 }
