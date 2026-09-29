@@ -129,6 +129,12 @@ the download **resumes from where it stopped** rather than starting over.
 Until it completes, the bytes live in a temporary `.part` file, so an
 unfinished download never masquerades as an installed model.
 
+A long download **pauses after five hours**. Android lets an app transfer
+data out of sight for six hours a day and stops the app if a transfer runs
+longer, so the download stops itself first. The screen you started it from says
+why; if you left it, the model just shows as not downloaded yet. Start the
+download again and it continues from the same byte.
+
 ### 3. Activate the model
 
 After the download finishes, the model shows up in the **Downloaded**

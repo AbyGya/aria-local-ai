@@ -19,6 +19,7 @@ Only Kotlin files appear inside the generated blocks.
   - `ContentUriReadInventoryTest.kt` - Inventory of every production file that opens a URI through `ContentResolver`, with where that URI comes from.
   - `CrashReportingConsentOwnerTest.kt` - Only the app's release-only observer turns the crash collector on or off.
   - `DomainPurityKonsistTest.kt` - Konsist guard enforcing the strictest project rule for the `domain` layer: it is pure Kotlin with **zero** Android/framework imports, so it can be compiled and unit-tested off-device.
+  - `DownloadStartCallSiteGuardTest.kt` - Census of the places that start a model download — which is also where the download's foreground-time budget starts over.
   - `EntrySurfaceLimitsDocumentsTest.kt` - Pins every number the public documents quote about the entry surfaces' limits to the constant that enforces it.
   - `ExportedComponentInventoryTest.kt` - Census of every component the app's source manifests export, and the permission each one demands of its caller.
   - `ExportedEntryExtrasGuardTest.kt` - Every component exported **without a permission** reads its caller's extras only inside a function that catches `RuntimeException`.
@@ -156,6 +157,7 @@ Only Kotlin files appear inside the generated blocks.
     - `AgentWorkerTest.kt` - Tests for AgentWorker.
     - `AttachmentOrphanCleanupWorkerTest.kt` - Robolectric coverage for the daily file-maintenance `AttachmentOrphanCleanupWorker`: both passes run, and a failure asks WorkManager to retry.
     - `ChargingTriggerSweepWorkerTest.kt` - Robolectric coverage for `ChargingTriggerSweepWorker` — the one-shot worker `PowerConnectionReceiver` enqueues on a power edge to fire charging triggers immediately.
+    - `DownloadForegroundBudgetTest.kt` - Covers the foreground-time budget that keeps a model download under Android's daily `dataSync` limit: what it books, when it runs out, and that the count outlives the process that measured it.
     - `embedding/` - Tests for the embedding service layer.
       - `CloudEmbeddingProviderTest.kt` - Unit tests for `CloudEmbeddingProvider`.
       - `DefaultKoogEmbedderFactoryTest.kt` - Unit tests for `DefaultKoogEmbedderFactory`.

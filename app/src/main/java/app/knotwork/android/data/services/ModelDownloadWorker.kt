@@ -9,6 +9,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.hilt.work.HiltWorker
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
@@ -22,6 +23,7 @@ import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 import java.io.File
 
@@ -51,10 +53,18 @@ import java.io.File
  * download that survives the screen must leave behind a model the app knows
  * about, not an anonymous file on disk.
  *
+ * **Android's daily limit.** A `dataSync` foreground service may run six hours
+ * a day while the app is out of sight, and one still running when that ends
+ * crashes the app. The worker therefore spends at most what
+ * [DownloadForegroundBudget] allows and then pauses, reporting a failure the
+ * screen shows; starting the download again resumes it from the partial file.
+ *
  * @property downloader Performs the resumable transfer.
  * @property settingsRepository Source of the stored Hugging Face token.
  * @property registerDownloadedModel Records the finished file in the local
  *   model store.
+ * @property foregroundBudget Foreground time the download may still spend
+ *   before it pauses, so it never reaches Android's `dataSync` limit.
  */
 @HiltWorker
 class ModelDownloadWorker @AssistedInject constructor(
@@ -63,14 +73,22 @@ class ModelDownloadWorker @AssistedInject constructor(
     private val downloader: ResumableFileDownloader,
     private val settingsRepository: SettingsRepository,
     private val registerDownloadedModel: RegisterDownloadedModelUseCase,
+    private val foregroundBudget: DownloadForegroundBudget,
 ) : CoroutineWorker(appContext, workerParams) {
 
     /**
-     * Runs one download attempt.
+     * Runs one download attempt, within the foreground time [foregroundBudget]
+     * still allows.
+     *
+     * A spent budget pauses the download before it enters the foreground, and a
+     * budget that runs out mid-transfer stops it between two chunks; either way
+     * the bytes so far stay in the partial file. If Android stops the worker for
+     * its own time limit regardless, the budget is marked spent so the re-run
+     * WorkManager schedules pauses at once instead of trying the foreground again.
      *
      * @return [Result.success] carrying the final path, [Result.retry] for a
      *   transport failure that resuming can still recover from, or
-     *   [Result.failure] carrying the message the UI shows.
+     *   [Result.failure] carrying the message the UI shows — including the pause.
      */
     override suspend fun doWork(): Result {
         val url = inputData.getString(KEY_URL)
@@ -78,7 +96,35 @@ class ModelDownloadWorker @AssistedInject constructor(
         if (url.isNullOrBlank() || fileName.isNullOrBlank()) {
             return Result.failure(workDataOf(KEY_ERROR to "Download request was missing its URL or file name."))
         }
+        if (foregroundBudget.isExhausted()) {
+            return pausedByTimeLimit()
+        }
 
+        val meter = foregroundBudget.startMeter()
+        return try {
+            transfer(url, fileName, meter)
+        } finally {
+            meter.record()
+            // Read in `finally`, not in a catch: the cancellation must leave
+            // untouched, and a worker that was not stopped reports
+            // STOP_REASON_NOT_STOPPED here.
+            if (stopReason == WorkInfo.STOP_REASON_FOREGROUND_SERVICE_TIMEOUT) {
+                foregroundBudget.exhaust()
+                Timber.w("Model download stopped by the foreground time limit; paused until the user starts it again")
+            }
+        }
+    }
+
+    /**
+     * Promotes the worker to the foreground and transfers the file, booking the
+     * foreground time on [meter] as progress arrives.
+     *
+     * @param url Direct URL of the model file.
+     * @param fileName Target file name.
+     * @param meter Books the foreground time against [foregroundBudget].
+     * @return The attempt's result; the pause when the budget runs out first.
+     */
+    private suspend fun transfer(url: String, fileName: String, meter: DownloadForegroundBudget.Meter): Result {
         promoteToForeground(fileName, progress = 0)
         val token = if (inputData.getBoolean(KEY_USE_STORED_AUTH, false)) {
             settingsRepository.huggingFaceAuthToken.first()
@@ -86,10 +132,13 @@ class ModelDownloadWorker @AssistedInject constructor(
             null
         }
 
-        val outcome = downloader.download(url = url, fileName = fileName, authToken = token) { percent ->
-            setProgress(workDataOf(KEY_PROGRESS to percent))
-            promoteToForeground(fileName, percent)
-        }
+        val outcome = withTimeoutOrNull(foregroundBudget.remainingMs()) {
+            downloader.download(url = url, fileName = fileName, authToken = token) { percent ->
+                meter.record()
+                setProgress(workDataOf(KEY_PROGRESS to percent))
+                promoteToForeground(fileName, percent)
+            }
+        } ?: return pausedByTimeLimit()
 
         return when (outcome) {
             is ResumableFileDownloader.Outcome.Success -> {
@@ -135,6 +184,23 @@ class ModelDownloadWorker @AssistedInject constructor(
             Timber.i("Model download attempt %d failed (%s); retrying.", runAttemptCount + 1, failure.message)
             Result.retry()
         }
+    }
+
+    /**
+     * Ends the attempt as paused: the foreground time budget is spent. Reported
+     * as a failure so the screen shows why the download stopped; starting it
+     * again resets the budget and resumes from the partial file.
+     *
+     * @return A failure carrying the pause message and no HTTP status.
+     */
+    private fun pausedByTimeLimit(): Result {
+        Timber.i("Model download paused: foreground time budget spent")
+        return Result.failure(
+            workDataOf(
+                KEY_ERROR to applicationContext.getString(R.string.model_download_paused_time_limit),
+                KEY_ERROR_CODE to NO_HTTP_CODE,
+            ),
+        )
     }
 
     override suspend fun getForegroundInfo(): ForegroundInfo = foregroundInfo(
