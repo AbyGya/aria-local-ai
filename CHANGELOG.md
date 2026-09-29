@@ -34,6 +34,12 @@ details.
 
 ### Fixed
 
+- **Stopping an on-device answer before its first words could crash the app.**
+  This happened when a local generation was stopped while the model was still
+  reading the request: by Stop, by a cancelled run, or by Android reclaiming
+  memory. The app now stops the model and waits for it to finish before
+  releasing it. With a long request, the model can take a few seconds to wind
+  down before the next local answer starts.
 - **README said the Play build and the release APKs share a signing key; they
   do not.** Google Play signs the copies it delivers with its own key, so
   Android refuses to install a release APK over a Play install, and the other

@@ -4,6 +4,7 @@ import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.res.Configuration
 import app.knotwork.android.di.ApplicationScope
+import app.knotwork.android.di.IoDispatcher
 import app.knotwork.android.domain.engine.LlmInferenceEngine
 import app.knotwork.android.domain.models.AppError
 import app.knotwork.android.domain.models.LocalBackend
@@ -17,12 +18,16 @@ import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.SamplerConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -32,6 +37,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 import java.io.File
 import javax.inject.Inject
@@ -43,12 +49,17 @@ import kotlin.random.Random
  *
  * This engine manages the lifecycle of the LiteRT-LM [Engine], which is optimized
  * specifically for Large Language Models (LLMs) on edge devices.
+ *
+ * @property ioDispatcher Dispatcher for engine construction and for the native
+ *   generation stream. Injected so a test can order a cancellation against the
+ *   native callbacks deterministically.
  */
 @Singleton
 class LiteRTLlmEngine @Inject constructor(
     @ApplicationContext private val context: Context,
     private val settingsRepository: SettingsRepository,
     @ApplicationScope private val appScope: CoroutineScope,
+    @IoDispatcher private val ioDispatcher: CoroutineDispatcher,
 ) : LlmInferenceEngine,
     ComponentCallbacks2 {
 
@@ -168,7 +179,7 @@ class LiteRTLlmEngine @Inject constructor(
         modelPath: String,
         enableVision: Boolean,
         enableAudio: Boolean,
-    ): Result<Unit, AppError> = withContext(Dispatchers.IO) {
+    ): Result<Unit, AppError> = withContext(ioDispatcher) {
         try {
             // Hold the native-session mutex across the whole (re-)initialization
             // so the check-then-build inside [initializeInternal] is atomic with
@@ -212,7 +223,7 @@ class LiteRTLlmEngine @Inject constructor(
 
     /**
      * Performs the actual engine construction. Split out from [initialize] so the
-     * `Dispatchers.IO` + try/catch boundary stays in one place while the body
+     * [ioDispatcher] + try/catch boundary stays in one place while the body
      * reads top-to-bottom.
      *
      * @param modelPath The exact path to the locally downloaded model file.
@@ -379,11 +390,11 @@ class LiteRTLlmEngine @Inject constructor(
     override fun generateResponseStream(prompt: String, imagePath: String?, temperature: Float?): Flow<String> =
         // With an image, the message is a multimodal [Contents] (image then text);
         // without, the plain-string overload keeps the text path byte-identical.
-        streamConversation(temperature) { conversation ->
+        streamConversation(temperature) { conversation, callback ->
             if (imagePath == null) {
-                conversation.sendMessageAsync(prompt)
+                conversation.sendMessageAsync(prompt, callback)
             } else {
-                conversation.sendMessageAsync(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)))
+                conversation.sendMessageAsync(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), callback)
             }
         }
 
@@ -399,11 +410,11 @@ class LiteRTLlmEngine @Inject constructor(
      *
      * @param audioPath Absolute path of the audio clip (16 kHz mono PCM WAV).
      * @param prompt The rendered transcription instruction.
-     * @return A [Flow] of transcript token chunks, emitted on [Dispatchers.IO].
+     * @return A [Flow] of transcript token chunks, emitted on [ioDispatcher].
      */
     override fun transcribe(audioPath: String, prompt: String): Flow<String> =
-        streamConversation(temperature = null) { conversation ->
-            conversation.sendMessageAsync(Contents.of(Content.AudioFile(audioPath), Content.Text(prompt)))
+        streamConversation(temperature = null) { conversation, callback ->
+            conversation.sendMessageAsync(Contents.of(Content.AudioFile(audioPath), Content.Text(prompt)), callback)
         }
 
     /**
@@ -416,68 +427,169 @@ class LiteRTLlmEngine @Inject constructor(
      * non-`null`), sends the caller-built message, and re-emits each chunk's
      * [Content.Text] parts as they arrive.
      *
+     * **The conversation is closed only once its native work has ended.** A
+     * stream that stops early — Stop, a cancelled run, a memory-pressure unload —
+     * cancels the native work and waits for LiteRT-LM's terminal callback before
+     * closing (see [awaitNativeWorkEnded]). Closing any earlier crashes the
+     * process: the Conversation's native destructor clears its session and then
+     * waits for pending tasks, and a prefill finishing inside that wait calls
+     * into the cleared session. This is why the callback overload of
+     * `sendMessageAsync` is used — the Flow overload never reports that its
+     * native work has ended once the collector is gone.
+     *
      * @param temperature Optional sampling-temperature override (see
      *   [generateResponseStream]); `null` uses the user's configured sampler.
-     * @param openResponses Builds and sends the message on the freshly opened
-     *   [Conversation], returning the LiteRT-LM response [Message] stream.
-     * @return A [Flow] of generated text chunks, emitted on [Dispatchers.IO].
+     * @param sendMessage Builds the message and sends it on the freshly opened
+     *   [Conversation], reporting the response through the given
+     *   [MessageCallback].
+     * @return A [Flow] of generated text chunks, emitted on [ioDispatcher].
      */
-    private fun streamConversation(temperature: Float?, openResponses: (Conversation) -> Flow<Message>): Flow<String> =
-        flow {
-            generationMutex.withLock {
-                // Read the native engine handle inside the lock so it cannot be
-                // freed by a concurrent unload between the null-check and use.
-                val currentEngine = engine
-                if (currentEngine == null) {
-                    Timber.e("Engine is not initialized")
-                    throw IllegalStateException("LLM Engine not initialized")
-                }
+    private fun streamConversation(
+        temperature: Float?,
+        sendMessage: (Conversation, MessageCallback) -> Unit,
+    ): Flow<String> = flow {
+        generationMutex.withLock {
+            // Read the native engine handle inside the lock so it cannot be
+            // freed by a concurrent unload between the null-check and use.
+            val currentEngine = engine
+            if (currentEngine == null) {
+                Timber.e("Engine is not initialized")
+                throw IllegalStateException("LLM Engine not initialized")
+            }
 
-                // LiteRT-LM allows only one active session. The orchestrator supplies
-                // the full history every time, so we close the old conversation and
-                // open a fresh one to prevent token accumulation and OOM crashes.
-                // Resolved after the initialization check, so an uninitialized
-                // engine still fails on that and not on a settings read. The
-                // mutex is held for the whole decode anyway, so one cached
-                // DataStore read inside it costs nothing measurable.
-                val conversationConfig = if (temperature == null) {
-                    userConversationConfig()
-                } else {
-                    repairConversationConfig(temperature)
+            // LiteRT-LM allows only one active session. The orchestrator supplies
+            // the full history every time, so we close the old conversation and
+            // open a fresh one to prevent token accumulation and OOM crashes.
+            // Resolved after the initialization check, so an uninitialized
+            // engine still fails on that and not on a settings read. The
+            // mutex is held for the whole decode anyway, so one cached
+            // DataStore read inside it costs nothing measurable.
+            val conversationConfig = if (temperature == null) {
+                userConversationConfig()
+            } else {
+                repairConversationConfig(temperature)
+            }
+            conversation?.close()
+            val activeConversation = currentEngine.createConversation(conversationConfig)
+            conversation = activeConversation
+            val generationJob = currentCoroutineContext()[Job]
+            activeGenerationJob = generationJob
+            val response = NativeResponse()
+            var nativeWorkStarted = false
+            try {
+                sendMessage(activeConversation, response)
+                nativeWorkStarted = true
+                for (chunk in response.messages) {
+                    val text = chunk.contents.contents
+                        .filterIsInstance<Content.Text>()
+                        .joinToString(separator = "") { it.text }
+                    if (text.isNotEmpty()) {
+                        emit(text)
+                    }
                 }
-                conversation?.close()
-                val activeConversation = currentEngine.createConversation(conversationConfig)
-                conversation = activeConversation
-                val generationJob = currentCoroutineContext()[Job]
-                activeGenerationJob = generationJob
-                try {
-                    openResponses(activeConversation).collect { chunk ->
-                        val text = chunk.contents.contents
-                            .filterIsInstance<Content.Text>()
-                            .joinToString(separator = "") { it.text }
-                        if (text.isNotEmpty()) {
-                            emit(text)
-                        }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.e(e, "Error during conversation streaming")
+                throw e
+            } finally {
+                // Close the native session on completion AND on cancellation
+                // (Stop button, scope death) so a cancelled generation never
+                // leaves a live conversation resident until the next call —
+                // but never while its native work is still running. A send
+                // that threw started nothing, so there is nothing to wait for.
+                withContext(NonCancellable) {
+                    if (nativeWorkStarted) {
+                        awaitNativeWorkEnded(activeConversation, response)
                     }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Timber.e(e, "Error during conversation streaming")
-                    throw e
-                } finally {
-                    // Close the native session on completion AND on cancellation
-                    // (Stop button, scope death) so a cancelled generation never
-                    // leaves a live conversation resident until the next call.
                     activeConversation.close()
-                    if (conversation === activeConversation) {
-                        conversation = null
-                    }
-                    if (activeGenerationJob === generationJob) {
-                        activeGenerationJob = null
-                    }
+                }
+                if (conversation === activeConversation) {
+                    conversation = null
+                }
+                if (activeGenerationJob === generationJob) {
+                    activeGenerationJob = null
                 }
             }
-        }.flowOn(Dispatchers.IO)
+        }
+    }.flowOn(ioDispatcher)
+
+    /**
+     * Cancels [conversation]'s native work and suspends until LiteRT-LM reports
+     * it ended, so the conversation can be closed safely.
+     *
+     * Returns at once when [response] already received its terminal callback —
+     * the ordinary end of a generation. Otherwise it cancels repeatedly, every
+     * [RECANCEL_INTERVAL_MS], because one cancel is not enough: LiteRT-LM marks
+     * only the tasks that exist at the moment of the cancel, and a prefill that
+     * finished just before it still starts a decode task with a fresh, unset
+     * cancel flag. A prefill that is already running is not interrupted either;
+     * the terminal callback arrives when it ends.
+     *
+     * There is deliberately no upper bound on the wait: closing before the
+     * native side ends is the crash this function exists to prevent, and how
+     * long a long prefill runs on a slow device is not known. The cost is that
+     * native work that never ends would hold [generationMutex] until the process
+     * restarts. A warning is logged every [STILL_WAITING_LOG_EVERY] attempts so
+     * such a hang is visible.
+     *
+     * @param conversation The conversation whose native work is cancelled.
+     * @param response The callback the work reports its terminal state to.
+     */
+    private suspend fun awaitNativeWorkEnded(conversation: Conversation, response: NativeResponse) {
+        var attempts = 0
+        while (!response.ended.isCompleted) {
+            conversation.cancelProcess()
+            attempts += 1
+            withTimeoutOrNull(RECANCEL_INTERVAL_MS) { response.ended.await() }
+            if (!response.ended.isCompleted && attempts % STILL_WAITING_LOG_EVERY == 0) {
+                Timber.w("Native generation still running after %d cancel attempts; conversation stays open", attempts)
+            }
+        }
+    }
+
+    /**
+     * Receives one message's response from LiteRT-LM on its native threads and
+     * hands it to the generation coroutine.
+     *
+     * [ended] completes on the terminal callback — `onDone` or `onError`, exactly
+     * one of which LiteRT-LM delivers — and is completed **before** [messages] is
+     * closed, so a stream that finished normally never looks unfinished to
+     * [awaitNativeWorkEnded].
+     */
+    private class NativeResponse : MessageCallback {
+        /** Response chunks in arrival order; closed with the error on failure. */
+        val messages = Channel<Message>(Channel.UNLIMITED)
+
+        /** Completes once the native side has reported its terminal state. */
+        val ended = CompletableDeferred<Unit>()
+
+        /**
+         * Forwards one response chunk.
+         *
+         * @param message The chunk LiteRT-LM produced.
+         */
+        override fun onMessage(message: Message) {
+            messages.trySend(message)
+        }
+
+        /** Marks the response complete and ends the chunk stream. */
+        override fun onDone() {
+            ended.complete(Unit)
+            messages.close()
+        }
+
+        /**
+         * Marks the response ended and fails the chunk stream with [throwable].
+         *
+         * @param throwable The native failure; a `CancellationException` when
+         *   the work was cancelled.
+         */
+        override fun onError(throwable: Throwable) {
+            ended.complete(Unit)
+            messages.close(throwable)
+        }
+    }
 
     /**
      * Unloads the engine from memory, releasing heavy resources. Acquires
@@ -548,9 +660,11 @@ class LiteRTLlmEngine @Inject constructor(
 
     /**
      * Cancels the generation currently holding [generationMutex], if any. The
-     * cancelled stream runs its `finally` (closing the native conversation) and
+     * cancelled stream runs its `finally` — cancelling the native work, waiting
+     * for it to end ([awaitNativeWorkEnded]) and closing the conversation — and
      * releases the mutex, letting a pending memory-pressure [unload] acquire it
-     * and free the engine without waiting for the full decode.
+     * and free the engine without waiting for the full decode. A prefill that is
+     * already running still finishes first: LiteRT-LM does not interrupt it.
      */
     private fun cancelActiveGeneration() {
         activeGenerationJob?.cancel(CancellationException("Engine unload requested under memory pressure"))
@@ -581,8 +695,9 @@ class LiteRTLlmEngine @Inject constructor(
         Timber.w("onTrimMemory called with level %d, unloading engine", level)
         // Cancel the in-flight decode so the memory-pressure unload frees the
         // engine promptly instead of waiting for the whole generation; the
-        // cancelled stream still tears its native session down safely in its
-        // `finally`, and the unload then acquires the released mutex.
+        // cancelled stream waits for its native work to end and closes the
+        // conversation in its `finally`, and the unload then acquires the
+        // released mutex.
         cancelActiveGeneration()
         val target = loadGeneration
         appScope.launch { unloadGeneration(target) }
@@ -710,5 +825,15 @@ class LiteRTLlmEngine @Inject constructor(
          * accepted as proof about the hardware.
          */
         const val BACKEND_FAILURE_STREAK_LIMIT: Int = 2
+
+        /**
+         * Pause between cancels while waiting for native work to end. Short enough
+         * that a decode started after the first cancel is stopped within a few
+         * tokens; each cancel is a single flag write under LiteRT-LM's task lock.
+         */
+        const val RECANCEL_INTERVAL_MS: Long = 200L
+
+        /** Cancel attempts between "still running" warnings — ten seconds apart. */
+        const val STILL_WAITING_LOG_EVERY: Int = 50
     }
 }
