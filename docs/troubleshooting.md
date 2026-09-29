@@ -27,6 +27,7 @@ Three sibling documents, and it is worth knowing which one you want:
 - [Memory search isn't finding an obvious entry](#memory-search-isnt-finding-an-obvious-entry)
 - ["Your data can't be unlocked" appears at startup](#your-data-cant-be-unlocked-appears-at-startup)
 - [Installing over a copy from Google Play fails](#installing-over-a-copy-from-google-play-fails)
+- [A model download paused after five hours](#a-model-download-paused-after-five-hours)
 
 ---
 
@@ -272,6 +273,13 @@ only with a copy from the same signer. To switch channels:
    export.
 3. Install from the other channel, download a model, set up your settings and
    keys again, and import the files.
+
+## A model download paused after five hours
+
+Android lets an app transfer data in the background for six hours a day, and
+stops the app if a transfer runs longer. A model download therefore pauses on
+its own after five hours of downloading. Nothing is lost: start the same
+download again and it continues from where it stopped.
 
 
 ---

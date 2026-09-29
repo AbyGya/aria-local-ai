@@ -34,6 +34,11 @@ details.
 
 ### Fixed
 
+- **A model download running in the background for many hours could crash the
+  app.** Android 15 and later allow an app six hours a day of data transfer
+  while it is out of sight, and stop the app if a transfer runs past that. A
+  download now pauses after five hours and says why; starting it again
+  continues from where it stopped.
 - **Stopping an on-device answer before its first words could crash the app.**
   This happened when a local generation was stopped while the model was still
   reading the request: by Stop, by a cancelled run, or by Android reclaiming

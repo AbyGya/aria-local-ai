@@ -180,6 +180,7 @@ Only Kotlin files appear inside the generated blocks.
     - `AttachmentOrphanCleanupScheduler.kt` - Owns the WorkManager scheduling of `AttachmentOrphanCleanupWorker`: a daily charging + device-idle job (unique-name + KEEP), same window as run retention. Wired from `MainActivity.onCreate`.
     - `AttachmentOrphanCleanupWorker.kt` - `@HiltWorker` running the daily file-maintenance pass: `CleanupOrphanAttachmentsUseCase` (backstop for attachments left behind by a failed eager delete), then `TransientCacheSweeper` over the cache's handoff directories.
     - `ChargingTriggerSweepWorker.kt` - One-shot `@HiltWorker` registered by `WorkManagerTriggerScheduler` as a `setRequiresCharging(true)` request, so `JobScheduler` wakes even a closed app within seconds of charging starting; loads the active **charging** triggers and hands each to `FireTriggerUseCase`. No firing logic of its own — the decision stays single-sourced with the periodic poll, which re-arms on unplug and re-enqueues this one-shot for the next charge edge.
+    - `DownloadForegroundBudget.kt` - Keeps model downloads under Android's daily limit for `dataSync` foreground services.
     - `embedding/` - `EmbeddingProvider` implementations and the Koog client seam.
       - `CloudEmbeddingProvider.kt` - OpenAI `text-embedding-3-small` provider (1536-d) via Koog; on-device fallback when no key.
       - `KoogEmbedderFactory.kt` - Factory (+ default impl) building Koog OpenAI/Ollama embedding clients; `List<Double> → FloatArray` helper.

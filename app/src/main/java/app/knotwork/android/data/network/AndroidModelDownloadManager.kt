@@ -7,6 +7,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import app.knotwork.android.data.services.DownloadForegroundBudget
 import app.knotwork.android.data.services.ModelDownloadWorker
 import app.knotwork.android.domain.models.AppError
 import app.knotwork.android.domain.models.DownloadState
@@ -36,8 +37,13 @@ import javax.inject.Inject
  * should do.
  *
  * @property workManager Schedules and observes the download work.
+ * @property foregroundBudget Foreground time downloads may spend before they
+ *   pause; started over by [downloadModel].
  */
-class AndroidModelDownloadManager @Inject constructor(private val workManager: WorkManager) : ModelDownloadManager {
+class AndroidModelDownloadManager @Inject constructor(
+    private val workManager: WorkManager,
+    private val foregroundBudget: DownloadForegroundBudget,
+) : ModelDownloadManager {
 
     override fun downloadModel(url: String, fileName: String, useStoredAuth: Boolean): Flow<DownloadState> = flow {
         val request = OneTimeWorkRequestBuilder<ModelDownloadWorker>()
@@ -57,6 +63,11 @@ class AndroidModelDownloadManager @Inject constructor(private val workManager: W
             .addTag(TAG_MODEL_DOWNLOAD)
             .addTag(fileNameTag(fileName))
             .build()
+        // Every caller is a user action on a visible screen, and Android resets
+        // its own daily `dataSync` count while the app is on screen — so the
+        // download's foreground budget starts over here too. This is also how a
+        // paused download continues: starting it again lands here.
+        foregroundBudget.reset()
         workManager.enqueueUniqueWork(uniqueWorkName(fileName), ExistingWorkPolicy.KEEP, request)
 
         emitAll(observeUniqueWork(fileName, requireLive = false))

@@ -212,7 +212,8 @@ class PersistentStorageInventoryGuardTest {
      * @property domain The backup domain the root lives in.
      * @property plaintextPath The root's path inside [domain] when its content is readable
      *   as is (not sealed under a device-bound key) — such a root is also excluded by this
-     *   name. `null` for encrypted or public content, covered by the domain-wide rule.
+     *   name. `null` for encrypted or public content, and for content that is readable but
+     *   not user data; the domain-wide rule covers those.
      * @property erasedBy The type the recovery wipe calls to erase the root, or `null` when
      *   the wipe keeps it — and then [kept] says why.
      * @property kept Why the wipe keeps the root; `null` when it erases it.
@@ -269,6 +270,18 @@ class PersistentStorageInventoryGuardTest {
          * never prompts (those are in [DATABASE]), and the wipe cancels and prunes it.
          */
         WORK_MANAGER_DB(domain = "database", plaintextPath = null, erasedBy = "TaskScheduler", kept = null),
+
+        /**
+         * The model download's foreground-time count (`DownloadForegroundBudget`) — one
+         * number of milliseconds in a plain preferences file. Readable, but not user data,
+         * so the domain-wide `sharedpref` rule is enough and no name rule is added.
+         */
+        DOWNLOAD_BUDGET(
+            domain = "sharedpref",
+            plaintextPath = null,
+            erasedBy = null,
+            kept = "one duration counter, not user data; the next download the user starts resets it",
+        ),
     }
 
     private companion object {
@@ -312,6 +325,7 @@ class PersistentStorageInventoryGuardTest {
             "/data/local/DownloadedModelFilesImpl.kt" to "DOWNLOADED_MODELS (read-only listing)",
             "/data/engine/MediaPipeTextEmbeddingEngine.kt" to "DOWNLOADED_MODELS (the embedding model)",
             "/debug/TriggerJournalDumpReceiver.kt" to "DEBUG_SOAK_DUMPS",
+            "/data/services/DownloadForegroundBudget.kt" to "DOWNLOAD_BUDGET",
         )
     }
 }

@@ -6,11 +6,13 @@ import androidx.work.OneTimeWorkRequest
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import app.knotwork.android.data.services.DownloadForegroundBudget
 import app.knotwork.android.data.services.ModelDownloadWorker
 import app.knotwork.android.domain.models.DownloadState
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import io.mockk.verifyOrder
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
@@ -32,12 +34,33 @@ import org.robolectric.RobolectricTestRunner
 class AndroidModelDownloadManagerTest {
 
     private lateinit var workManager: WorkManager
+    private lateinit var foregroundBudget: DownloadForegroundBudget
     private lateinit var manager: AndroidModelDownloadManager
 
     @Before
     fun setUp() {
         workManager = mockk(relaxed = true)
-        manager = AndroidModelDownloadManager(workManager)
+        foregroundBudget = mockk(relaxed = true)
+        manager = AndroidModelDownloadManager(workManager, foregroundBudget)
+    }
+
+    @Test
+    fun `given a requested download when it is enqueued then the foreground budget starts over`() = runTest {
+        stubWorkInfos(
+            workInfo(
+                WorkInfo.State.SUCCEEDED,
+                output = workDataOf(ModelDownloadWorker.KEY_OUTPUT_PATH to "/models/m.bin"),
+            ),
+        )
+
+        manager.downloadModel("http://example.com/m.bin", "m.bin").toList()
+
+        // The user is on screen at this moment, so Android's own daily count
+        // starts over too — which is what makes resetting here honest.
+        verifyOrder {
+            foregroundBudget.reset()
+            workManager.enqueueUniqueWork(any<String>(), any(), any<OneTimeWorkRequest>())
+        }
     }
 
     @Test

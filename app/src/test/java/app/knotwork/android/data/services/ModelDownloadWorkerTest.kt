@@ -1,19 +1,30 @@
 package app.knotwork.android.data.services
 
 import android.content.Context
+import androidx.work.ForegroundInfo
+import androidx.work.ForegroundUpdater
 import androidx.work.ListenableWorker
+import androidx.work.WorkInfo
 import androidx.work.WorkerFactory
 import androidx.work.WorkerParameters
 import androidx.work.testing.TestListenableWorkerBuilder
 import androidx.work.workDataOf
+import app.knotwork.android.R
 import app.knotwork.android.data.network.ResumableFileDownloader
 import app.knotwork.android.domain.repositories.SettingsRepository
 import app.knotwork.android.domain.usecases.RegisterDownloadedModelUseCase
+import com.google.common.util.concurrent.ListenableFuture
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -22,6 +33,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import java.util.UUID
+import java.util.concurrent.Executor
+import java.util.concurrent.TimeUnit
 
 /**
  * Covers the download worker's policy decisions: what it does with the token,
@@ -159,11 +173,112 @@ class ModelDownloadWorkerTest {
         coVerify(exactly = 0) { downloader.download(any(), any(), any(), any()) }
     }
 
+    @Test
+    fun `given the foreground budget is spent when the download starts then it pauses without the foreground`() =
+        runTest {
+            val budget = DownloadForegroundBudget(context).apply { exhaust() }
+            val foreground = RecordingForegroundUpdater()
+
+            val result = worker(budget = budget, foreground = foreground).doWork()
+
+            // Entering the foreground now would be refused by Android until the
+            // user returns — or, worse, restart the clock that ends in a crash.
+            val failure = result as ListenableWorker.Result.Failure
+            assertEquals(
+                context.getString(R.string.model_download_paused_time_limit),
+                failure.outputData.getString(ModelDownloadWorker.KEY_ERROR),
+            )
+            assertEquals(0, foreground.calls)
+            coVerify(exactly = 0) { downloader.download(any(), any(), any(), any()) }
+        }
+
+    @Test
+    fun `given the budget runs out mid-transfer when downloading then it pauses instead of finishing`() = runTest {
+        val budget = virtualBudget()
+        spend(budget, DownloadForegroundBudget.BUDGET_MS - TEN_MINUTES_MS)
+        coEvery { downloader.download(any(), any(), any(), any()) } coAnswers {
+            delay(2 * TEN_MINUTES_MS)
+            ResumableFileDownloader.Outcome.Success("/models/m.bin")
+        }
+
+        val result = worker(budget = budget).doWork()
+
+        // The transfer is stopped between two chunks and its bytes stay in the
+        // partial file, so tapping Download again continues from there.
+        val failure = result as ListenableWorker.Result.Failure
+        assertEquals(
+            context.getString(R.string.model_download_paused_time_limit),
+            failure.outputData.getString(ModelDownloadWorker.KEY_ERROR),
+        )
+        assertTrue(budget.isExhausted())
+        coVerify(exactly = 0) { registerDownloadedModel(any(), any(), any()) }
+    }
+
+    @Test
+    fun `given time in the foreground when the download runs then it is booked against the budget`() = runTest {
+        val budget = virtualBudget()
+        var leftAtProgress = -1L
+        coEvery { downloader.download(any(), any(), any(), any()) } coAnswers {
+            val onProgress = arg<suspend (Int) -> Unit>(3)
+            delay(TEN_MINUTES_MS)
+            onProgress(50)
+            leftAtProgress = budget.remainingMs()
+            delay(TEN_MINUTES_MS)
+            ResumableFileDownloader.Outcome.Success("/models/m.bin")
+        }
+
+        worker(budget = budget).doWork()
+
+        // Booked as progress arrives, not only at the end: a process killed
+        // mid-transfer loses at most the stretch since the last percent.
+        assertEquals(DownloadForegroundBudget.BUDGET_MS - TEN_MINUTES_MS, leftAtProgress)
+        assertEquals(DownloadForegroundBudget.BUDGET_MS - 2 * TEN_MINUTES_MS, budget.remainingMs())
+    }
+
+    @Test
+    fun `given Android stops the download for its time limit when it is cancelled then the budget is spent`() =
+        runTest {
+            val budget = virtualBudget()
+            coEvery { downloader.download(any(), any(), any(), any()) } coAnswers { awaitCancellation() }
+            val subject = worker(budget = budget)
+            val run = launch { subject.doWork() }
+            runCurrent()
+
+            // WorkManager records the reason and then cancels the work; `stop` is
+            // its own (library-restricted) entry point for exactly that.
+            subject.stop(WorkInfo.STOP_REASON_FOREGROUND_SERVICE_TIMEOUT)
+            run.cancel()
+            run.join()
+
+            // The count fell short of Android's, so the next run must pause at
+            // once rather than try the foreground again.
+            assertTrue(budget.isExhausted())
+        }
+
+    @Test
+    fun `given the download is stopped for another reason when it is cancelled then the budget keeps its time`() =
+        runTest {
+            val budget = virtualBudget()
+            coEvery { downloader.download(any(), any(), any(), any()) } coAnswers { awaitCancellation() }
+            val subject = worker(budget = budget)
+            val run = launch { subject.doWork() }
+            runCurrent()
+            advanceTimeBy(TEN_MINUTES_MS)
+
+            subject.stop(WorkInfo.STOP_REASON_CONSTRAINT_CONNECTIVITY)
+            run.cancel()
+            run.join()
+
+            assertEquals(DownloadForegroundBudget.BUDGET_MS - TEN_MINUTES_MS, budget.remainingMs())
+        }
+
     private fun worker(
         url: String? = "http://example.com/m.bin",
         fileName: String = "m.bin",
         useStoredAuth: Boolean = false,
         runAttemptCount: Int = 0,
+        budget: DownloadForegroundBudget = DownloadForegroundBudget(context),
+        foreground: RecordingForegroundUpdater = RecordingForegroundUpdater(),
     ): ModelDownloadWorker = TestListenableWorkerBuilder<ModelDownloadWorker>(context)
         .setInputData(
             workDataOf(
@@ -173,6 +288,7 @@ class ModelDownloadWorkerTest {
             ),
         )
         .setRunAttemptCount(runAttemptCount)
+        .setForegroundUpdater(foreground)
         .setWorkerFactory(
             object : WorkerFactory() {
                 override fun createWorker(
@@ -185,8 +301,60 @@ class ModelDownloadWorkerTest {
                     downloader,
                     settingsRepository,
                     registerDownloadedModel,
+                    budget,
                 )
             },
         )
         .build()
+
+    /**
+     * A budget measured on the test's virtual clock, so a download's foreground
+     * time is exactly the virtual time it spent.
+     */
+    private fun TestScope.virtualBudget(): DownloadForegroundBudget = DownloadForegroundBudget(
+        preferences = { context.getSharedPreferences("virtual-budget", Context.MODE_PRIVATE) },
+        clock = { testScheduler.currentTime },
+    )
+
+    /** Books [spentMs] of foreground time against [budget] on the virtual clock. */
+    private fun TestScope.spend(budget: DownloadForegroundBudget, spentMs: Long) {
+        val meter = budget.startMeter()
+        advanceTimeBy(spentMs)
+        meter.record()
+    }
+
+    /** Counts the worker's requests to enter or update the foreground. */
+    private class RecordingForegroundUpdater : ForegroundUpdater {
+        /** Requests received so far. */
+        var calls = 0
+
+        override fun setForegroundAsync(
+            context: Context,
+            id: UUID,
+            foregroundInfo: ForegroundInfo,
+        ): ListenableFuture<Void> {
+            calls += 1
+            return CompletedFuture
+        }
+    }
+
+    /** A future that is already complete, as a granted foreground request is. */
+    private object CompletedFuture : ListenableFuture<Void> {
+        override fun addListener(listener: Runnable, executor: Executor) = executor.execute(listener)
+
+        override fun cancel(mayInterruptIfRunning: Boolean): Boolean = false
+
+        override fun isCancelled(): Boolean = false
+
+        override fun isDone(): Boolean = true
+
+        override fun get(): Void? = null
+
+        override fun get(timeout: Long, unit: TimeUnit): Void? = null
+    }
+
+    private companion object {
+        /** Ten minutes of virtual time, in milliseconds. */
+        const val TEN_MINUTES_MS = 10L * 60L * 1_000L
+    }
 }
