@@ -47,6 +47,7 @@ Only Kotlin files appear inside the generated blocks.
   - `SurfaceBindingReadersTest.kt` - Only the callers that need a binding **after** its pipeline is gone read the raw surface binding; everything that starts a run from a surface, or shows it as ready, reads the existence-checked one.
   - `TabRootEntryGuardTest.kt` - Structural guard over the one navigation invariant the closed test bought us:
   - `TimberMessageTemplateKonsistTest.kt` - Census of the message every `WARN`-and-above Timber call writes: it must be a **string literal without templates**, with anything dynamic passed as a format argument.
+  - `TimeLimitedForegroundServiceGuardTest.kt` - Keeps every foreground service with an Android time limit under a budget that stops it before the limit runs out.
   - `TopBarInsetGuardTest.kt` - Structural guard: **a bar at the top of a screen applies the status-bar inset, or a named parent applies it for it.**
   - `TranscriptJoinKonsistTest.kt` - Census of the idiom that let stored content forge a turn of its own inside a prompt: a speaker label and a message body spliced into one string template, `"${message.role.name}: ${message.content}"`.
   - `TransientCacheDirectoryGuardTest.kt` - Every directory the app creates under its cache is an entry of `TransientCacheDirectory` — and therefore swept by the daily maintenance pass.

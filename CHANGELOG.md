@@ -24,6 +24,12 @@ details.
   two-line statement that picks the release key, and the other half compiled
   only by chance. The statement is now split so that F-Droid removes the whole
   assignment, and a test fails the build if that shape changes.
+- **A test now fails when a foreground service with an Android time limit
+  lacks a budget.** Android takes an app down when its `dataSync`,
+  `mediaProcessing` or `shortService` foreground service outlives the type's
+  time limit. Model downloads are the app's only such service and stop
+  themselves first; the test fails if another one is declared, or if a
+  `dataSync` user skips the budget.
 - **Branch names, commit messages and pull request titles follow the
   contributor guide.** The guide described `feature/<kebab-name>` branches and
   seven commit types, while the project's own history carried internal planning
