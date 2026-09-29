@@ -1880,6 +1880,12 @@ tasks.withType<Test>().configureEach {
     inputs.file(rootProject.file(".github/workflows/instrumented.yml"))
         .withPropertyName("instrumentedWorkflow")
         .withPathSensitivity(PathSensitivity.RELATIVE)
+    // `TimeLimitedForegroundServiceGuardTest` reads the merged-manifest
+    // expectations for the foreground-service permissions each flavour ships;
+    // they sit at the repository root, on no classpath.
+    inputs.dir(rootProject.file("config/merged-manifest"))
+        .withPropertyName("mergedManifestExpectations")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
     // Same trap once more, and it was observed springing: `CookbookRuntimeReachTest`
     // reads the published Markdown and `CookbookRecipeValidationTest` reads the
     // recipe documents, neither of which is on any classpath. Without these two
