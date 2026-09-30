@@ -4,6 +4,20 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.SET_ALARM" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
     <!-- Optional: only requested when the user scopes a Wi-Fi trigger to specific
          network names (SSIDs). Reading the connected Wi-Fi SSID requires fine
          location on modern Android; without the grant, SSID-scoped triggers simply
@@ -125,11 +139,11 @@
             (and the older, recreated one was sometimes a blank frame).
         -->
         <activity
-            android:name=".presentation.ui.MainActivity"
+            android:name=".presentation.ui.AriaMainActivity"
             android:exported="true"
             android:label="@string/app_name"
             android:launchMode="singleTask"
-            android:theme="@style/Theme.App.Splash">
+            android:theme="@style/Theme.Aria">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 

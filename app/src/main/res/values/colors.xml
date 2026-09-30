@@ -106,4 +106,15 @@
     <color name="knotwork_on_surface_2">#FF3B3732</color>
     <color name="knotwork_on_surface_muted">#FF6D6863</color>
     <color name="knotwork_on_surface_dim">#FF95918D</color>
+
+    <!-- Aria Minimalist Organic palette -->
+    <color name="aria_sage_500">#FF6B8F52</color>
+    <color name="aria_sage_300">#FFA8C09A</color>
+    <color name="aria_terracotta_500">#FFC67B5C</color>
+    <color name="aria_dusty_blue_400">#FF7C9EB2</color>
+    <color name="aria_wheat_400">#FFD4A574</color>
+    <color name="aria_surface_light">#FFFAF9F6</color>
+    <color name="aria_surface_dark">#FF1A1A1A</color>
+    <color name="aria_on_surface_light">#FF1A1A1A</color>
+    <color name="aria_on_surface_dark">#FFF5F4F0</color>
 </resources>

@@ -196,6 +196,13 @@ android {
     // without it.
     ndkVersion = libs.versions.ndk.get()
 
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
     defaultConfig {
         applicationId = "app.knotwork.android"
         minSdk = 34
@@ -2029,6 +2036,9 @@ dependencies {
 
     // LiteRT LLM Inference
     implementation(libs.litertlm)
+
+    // llama.cpp JNI (Aria primary backend)
+    implementation("com.github.ggerganov:llama.cpp:master")
 
     // MediaPipe Tasks Text.
     //
