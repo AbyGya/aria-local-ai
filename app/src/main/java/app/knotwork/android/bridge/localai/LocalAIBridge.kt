@@ -2,6 +2,7 @@ package app.knotwork.android.bridge.localai
 
 import app.knotwork.android.domain.models.AppError
 import app.knotwork.android.domain.models.Result
+import app.knotwork.android.domain.repositories.NetworkActivityTracker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -21,12 +22,27 @@ import javax.inject.Singleton
 
 private object LocalAIBridgeError : AppError.Network
 
+/**
+ * Aria's optional bridge to a LocalAI server on the local network.
+ *
+ * Every call is plain HTTP against the OpenAI-compatible surface LocalAI
+ * exposes, so no cloud provider and no API key is involved: the request goes to
+ * whatever machine the user pointed the app at, over their own network.
+ *
+ * The read timeout is long because a cold model load on a server-side GPU is
+ * measured in tens of seconds, not the couple of seconds a chat request takes
+ * once the model is resident; the connect budget is generous for the same
+ * reason, since the server may be waking from idle.
+ *
+ * @property networkActivityTracker records each request so the privacy pill
+ *   reflects that the app left the device.
+ */
 @Singleton
-class LocalAIBridge @Inject constructor() {
+class LocalAIBridge @Inject constructor(private val networkActivityTracker: NetworkActivityTracker) {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .writeTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .readTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .writeTimeout(WRITE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -54,8 +70,8 @@ class LocalAIBridge @Inject constructor() {
                     "temperature" to JsonPrimitive(temperature),
                     "max_tokens" to JsonPrimitive(maxTokens),
                     "stream" to JsonPrimitive(stream),
-                )
-            )
+                ),
+            ),
         )
     }
 
@@ -65,6 +81,7 @@ class LocalAIBridge @Inject constructor() {
                 .url("$baseUrl/v1/models")
                 .get()
                 .build()
+            networkActivityTracker.recordOutbound()
             client.newCall(request).execute().use { response ->
                 response.isSuccessful
             }
@@ -79,6 +96,7 @@ class LocalAIBridge @Inject constructor() {
                 .url("$baseUrl/v1/models")
                 .get()
                 .build()
+            networkActivityTracker.recordOutbound()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext Result.Error(error = LocalAIBridgeError, message = "HTTP ${response.code}")
@@ -108,9 +126,19 @@ class LocalAIBridge @Inject constructor() {
         try {
             val request = Request.Builder()
                 .url("$baseUrl/v1/chat/completions")
-                .post(chatPayload(model, prompt, systemPrompt, temperature, maxTokens, stream = false).toRequestBody("application/json".toMediaType()))
+                .post(
+                    chatPayload(
+                        model,
+                        prompt,
+                        systemPrompt,
+                        temperature,
+                        maxTokens,
+                        stream = false,
+                    ).toRequestBody("application/json".toMediaType()),
+                )
                 .build()
 
+            networkActivityTracker.recordOutbound()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext Result.Error(
@@ -136,3 +164,7 @@ class LocalAIBridge @Inject constructor() {
         }
     }
 }
+
+private const val CONNECT_TIMEOUT_SECONDS = 30L
+private const val READ_TIMEOUT_SECONDS = 120L
+private const val WRITE_TIMEOUT_SECONDS = 30L

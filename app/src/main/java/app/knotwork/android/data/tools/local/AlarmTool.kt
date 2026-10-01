@@ -11,35 +11,36 @@ import javax.inject.Singleton
 
 private object AlarmToolError : AppError.System
 
+/**
+ * Alarm tool: creates an alarm or opens the clock app's alarm list.
+ *
+ * Both go through `AlarmClock`, so the alarm lands in the user's own clock app
+ * — including its default ringtone and alarm-category behaviour — rather than
+ * in a private alarm the agent could not later see or cancel.
+ */
 @Singleton
-class AlarmTool @Inject constructor(
-    @ApplicationContext private val context: Context,
-) {
-    fun setAlarm(hour: Int, minute: Int, message: String): Result<String, AppError> {
-        return try {
-            val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
-                putExtra(AlarmClock.EXTRA_HOUR, hour)
-                putExtra(AlarmClock.EXTRA_MINUTES, minute)
-                putExtra(AlarmClock.EXTRA_MESSAGE, message)
-                putExtra(AlarmClock.EXTRA_SKIP_UI, true)
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            context.startActivity(intent)
-            Result.Success("Alarm set for ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}")
-        } catch (e: Exception) {
-            Result.Error(error = AlarmToolError, message = "Failed to set alarm: ${e.message}", throwable = e)
+class AlarmTool @Inject constructor(@ApplicationContext private val context: Context) {
+    fun setAlarm(hour: Int, minute: Int, message: String): Result<String, AppError> = try {
+        val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+            putExtra(AlarmClock.EXTRA_HOUR, hour)
+            putExtra(AlarmClock.EXTRA_MINUTES, minute)
+            putExtra(AlarmClock.EXTRA_MESSAGE, message)
+            putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
+        context.startActivity(intent)
+        Result.Success("Alarm set for ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}")
+    } catch (e: Exception) {
+        Result.Error(error = AlarmToolError, message = "Failed to set alarm: ${e.message}", throwable = e)
     }
 
-    fun showAlarms(): Result<String, AppError> {
-        return try {
-            val intent = Intent(AlarmClock.ACTION_SHOW_ALARMS).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            context.startActivity(intent)
-            Result.Success("Showing alarms")
-        } catch (e: Exception) {
-            Result.Error(error = AlarmToolError, message = "Failed to show alarms: ${e.message}", throwable = e)
+    fun showAlarms(): Result<String, AppError> = try {
+        val intent = Intent(AlarmClock.ACTION_SHOW_ALARMS).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
+        context.startActivity(intent)
+        Result.Success("Showing alarms")
+    } catch (e: Exception) {
+        Result.Error(error = AlarmToolError, message = "Failed to show alarms: ${e.message}", throwable = e)
     }
 }

@@ -12,12 +12,10 @@
     <uses-permission android:name="android.permission.SET_ALARM" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
-        tools:ignore="ScopedStorage" />
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
     <!-- Optional: only requested when the user scopes a Wi-Fi trigger to specific
          network names (SSIDs). Reading the connected Wi-Fi SSID requires fine
          location on modern Android; without the grant, SSID-scoped triggers simply
@@ -63,6 +61,18 @@
     <queries>
         <intent>
             <action android:name="android.app.appfunctions.AppFunctionService" />
+        </intent>
+        <!--
+            Visibility of launchable apps, so `openApp` can resolve a package name
+            to a launcher intent. Declared as a capability rather than the
+            QUERY_ALL_PACKAGES permission: package visibility on Android 11+ is
+            filtered, and a permission broad enough to see everything would be a
+            far larger grant than this one lookup needs. A MAIN/LAUNCHER intent
+            filter is the narrow form of the same question.
+        -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
         </intent>
         <!--
             Visibility of automation apps that publish a manifest receiver for the

@@ -378,6 +378,7 @@ Paths below are relative to `src/main/java/app/knotwork/design/`.
 - `theme/` - root theme.
   - `KnotworkTheme.kt` - `@Composable fun KnotworkTheme(...)` wires Knotwork tokens into `MaterialTheme` and installs the extended / spacing / shape / elevation / motion / a11y composition locals; sibling `object KnotworkTheme` exposes them via `KnotworkTheme.extended` / `.spacing` / `.shapes` / `.elevation` / `.motion` / `.a11y`.
 - `tokens/` - design tokens.
+  - `AriaColor.kt` - Aria's Minimalist Organic palette.
   - `Color.kt` - `KnotworkPalette`, `KnotworkLight`, `KnotworkDark`, plus `knotworkLightColorScheme()` / `knotworkDarkColorScheme()` Material3 mappings.
   - `Elevation.kt` - `KnotworkElevation` levels + `LocalKnotworkElevation`.
   - `ExtendedColors.kt` - `KnotworkExtendedColors` data class (chat surfaces, console, risk pills, 12 node hues) and the `LocalKnotworkExtendedColors` composition local provider.

@@ -2,6 +2,7 @@ package app.knotwork.android.data.engine
 
 import android.content.ComponentCallbacks2
 import android.content.Context
+import android.content.res.Configuration
 import app.knotwork.android.di.ApplicationScope
 import app.knotwork.android.di.IoDispatcher
 import app.knotwork.android.domain.engine.LlmInferenceEngine
@@ -14,8 +15,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -30,13 +29,41 @@ import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * On-device inference engine backed by llama.cpp over JNI.
+ *
+ * This is Aria's primary local backend, chosen over the bundled LiteRT-LM
+ * engine because llama.cpp runs on any arm64 SoC: it needs nothing but a CPU
+ * (and optionally Vulkan), which matters on the MediaTek parts that LiteRT's
+ * dispatch layer does not cover.
+ *
+ * Concurrency follows the same discipline the LiteRT engine uses: a single
+ * mutex serialises every native access — generation, load and unload — because
+ * freeing a native context while a decode is streaming is a use-after-free.
+ * [loadGeneration] stamps each successful load so a memory-pressure unload
+ * queued against an older engine cannot tear down the one that replaced it.
+ *
+ * Until the real llama.cpp sources are vendored under `src/main/cpp`, the
+ * native entry points are stubs and no model can actually be loaded; loading
+ * the library is therefore best-effort so the app still starts and can explain
+ * the situation rather than dying in class initialisation.
+ *
+ * @property context used to register for trim callbacks and to resolve the
+ *   model path.
+ * @property settingsRepository supplies the context length, the sampling
+ *   parameters and the selected backend.
+ * @property appScope hosts the fire-and-forget unloads triggered by lifecycle
+ *   callbacks, which cannot suspend.
+ * @property ioDispatcher carries engine construction and the native decode.
+ */
 @Singleton
 class LlamaCppEngine @Inject constructor(
     @ApplicationContext private val context: Context,
     private val settingsRepository: SettingsRepository,
     @ApplicationScope private val appScope: CoroutineScope,
     @IoDispatcher private val ioDispatcher: CoroutineDispatcher,
-) : LlmInferenceEngine, ComponentCallbacks2 {
+) : LlmInferenceEngine,
+    ComponentCallbacks2 {
 
     private var nativeHandle: Long = 0L
     private var _currentModelPath: String? = null
@@ -78,7 +105,14 @@ class LlamaCppEngine @Inject constructor(
     private object LlmSystemError : AppError.System
 
     external fun nativeInit(modelPath: String, nThreads: Int, nCtx: Int, useGpu: Boolean): Long
-    external fun nativeGenerate(handle: Long, prompt: String, temperature: Float, topK: Int, topP: Float, maxTokens: Int): String
+    external fun nativeGenerate(
+        handle: Long,
+        prompt: String,
+        temperature: Float,
+        topK: Int,
+        topP: Float,
+        maxTokens: Int,
+    ): String
     external fun nativeClose(handle: Long)
     external fun nativeTokenize(handle: Long, text: String): IntArray
     external fun nativeDetokenize(handle: Long, tokens: IntArray): String
@@ -129,7 +163,11 @@ class LlamaCppEngine @Inject constructor(
             )
         }
 
-        if (nativeHandle != 0L && _currentModelPath == modelPath && _isVisionEnabled == enableVision && _isAudioEnabled == enableAudio) {
+        if (nativeHandle != 0L &&
+            _currentModelPath == modelPath &&
+            _isVisionEnabled == enableVision &&
+            _isAudioEnabled == enableAudio
+        ) {
             return Result.Success(Unit)
         }
 
@@ -170,7 +208,10 @@ class LlamaCppEngine @Inject constructor(
 
         nativeHandle = nativeInit(modelPath, nThreads, maxTokens, useGpu)
         if (nativeHandle == 0L) {
-            throw RuntimeException("Failed to initialize llama.cpp native engine")
+            return Result.Error(
+                error = LlmSystemError,
+                message = "llama.cpp returned no handle for $modelPath",
+            )
         }
 
         _currentModelPath = modelPath
@@ -180,48 +221,47 @@ class LlamaCppEngine @Inject constructor(
         settingsRepository.setLocalBackendFailureStreak(0)
         _activeBackend = resolved
         Timber.i(
-            "LlamaCpp Engine successfully initialized with $modelPath (vision=$enableVision, audio=$enableAudio, backend=$resolved)",
+            "LlamaCpp Engine initialized: model=$modelPath vision=$enableVision " +
+                "audio=$enableAudio backend=$resolved",
         )
 
         return Result.Success(Unit)
     }
 
-    override fun generateResponseStream(prompt: String, imagePath: String?, temperature: Float?): Flow<String> =
-        flow {
-            generationMutex.withLock {
-                val handle = nativeHandle
-                if (handle == 0L) {
-                    Timber.e("Engine is not initialized")
-                    throw IllegalStateException("LLM Engine not initialized")
-                }
+    override fun generateResponseStream(prompt: String, imagePath: String?, temperature: Float?): Flow<String> = flow {
+        generationMutex.withLock {
+            val handle = nativeHandle
+            if (handle == 0L) {
+                Timber.e("Engine is not initialized")
+                throw IllegalStateException("LLM Engine not initialized")
+            }
 
-                val generationJob = currentCoroutineContext()[Job]
-                activeGenerationJob = generationJob
+            val generationJob = currentCoroutineContext()[Job]
+            activeGenerationJob = generationJob
 
-                try {
-                    val temp = temperature ?: settingsRepository.temperature.first()
-                    val topK = settingsRepository.topK.first()
-                    val topP = settingsRepository.topP.first()
-                    val maxTokens = settingsRepository.maxContextLength.first()
+            try {
+                val temp = temperature ?: settingsRepository.temperature.first()
+                val topK = settingsRepository.topK.first()
+                val topP = settingsRepository.topP.first()
+                val maxTokens = settingsRepository.maxContextLength.first()
 
-                    val response = nativeGenerate(handle, prompt, temp, topK, topP, maxTokens)
-                    emit(response)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Timber.e(e, "Error during generation")
-                    throw e
-                } finally {
-                    if (activeGenerationJob === generationJob) {
-                        activeGenerationJob = null
-                    }
+                val response = nativeGenerate(handle, prompt, temp, topK, topP, maxTokens)
+                emit(response)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.e(e, "Error during generation")
+                throw e
+            } finally {
+                if (activeGenerationJob === generationJob) {
+                    activeGenerationJob = null
                 }
             }
-        }.flowOn(ioDispatcher)
+        }
+    }.flowOn(ioDispatcher)
 
-    override fun transcribe(audioPath: String, prompt: String): Flow<String> {
+    override fun transcribe(audioPath: String, prompt: String): Flow<String> =
         throw UnsupportedOperationException("Audio transcription not supported by llama.cpp engine")
-    }
 
     override suspend fun unload() = generationMutex.withLock { unloadInternal() }
 
@@ -247,7 +287,10 @@ class LlamaCppEngine @Inject constructor(
         context.unregisterComponentCallbacks(this)
     }
 
-    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {}
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        // No action needed: the engine's memory footprint does not depend on the
+        // device configuration, so a rotation or a locale change needs no rebuild.
+    }
 
     override fun onLowMemory() {
         Timber.w("onLowMemory called, unloading engine")

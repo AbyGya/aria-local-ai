@@ -1,64 +1,87 @@
 # Aria — Local AI Assistant for Android
 
-Aria is a privacy-first, on-device AI assistant for Android. It can think, learn, and execute commands — all running locally on your phone.
+Aria is a privacy-first, on-device AI assistant for Android. It can plan, learn,
+and act on the phone — inference runs locally, and nothing leaves the device
+unless the user points Aria at a server themselves.
+
+## Who it's for
+
+People who want an assistant that keeps working on a plane, in a dead spot, or
+with the SIM pulled, and who would rather their prompts never touched someone
+else's server. The trade is honest: a model small enough to live on a phone is
+weaker at long reasoning than a frontier one, and Aria covers that with tools,
+memory and an optional bridge to a bigger model on hardware the user controls.
+
+## Requirements
+
+- Android 14 (API 34) or newer
+- arm64-v8a device — 4 GB RAM for the small models, 8 GB for a 4B model
+- About 3–5 GB of free storage for the model weights
+- JDK 21 and the Android SDK (34+ platforms, build-tools) to build from source
+
+## Install
+
+Download the APK from the repository's
+[Actions](https://github.com/AbyGya/aria-local-ai/actions) page
+(**Build Aria APK** → *Artifacts* → `aria-release-apk`), then allow installs
+from that source when your file manager asks. The app is also on the F-Droid
+channel as the `foss` flavour, which carries no Google dependencies.
+
+To build it yourself:
+
+```bash
+./gradlew assembleFossDebug     # debug APK
+./gradlew assembleFossRelease   # release APK, debug-signed without a key
+./gradlew check                # the full quality gate
+```
 
 ## Features
 
-- **On-Device LLM**: Powered by llama.cpp with Qwen 3.5 / Gemma 3 models
-- **Agentic Engine**: Multi-step planning, tool calling, and execution
-- **Phone Automation**: SMS, calls, notifications, files, settings
-- **Smart Home**: MQTT and Home Assistant integration
-- **Memory & RAG**: Long-term memory with vector search
-- **LocalAI Bridge**: Connect to a local server for heavy tasks
-- **Bilingual**: English and Bahasa Indonesia
-- **Minimalist Organic Theme**: Warm, natural design
+- **On-device LLM** — llama.cpp over JNI, so any arm64 SoC is covered rather
+  than only the parts with a vendor NPU SDK
+- **Agentic engine** — multi-step planning, tool calling, and a
+  human-in-the-loop gate before anything sensitive runs
+- **Phone tools** — SMS, calls, notifications, files, alarms, apps, Wi-Fi
+- **Smart home** — Home Assistant over its REST API
+- **Memory and RAG** — on-device embeddings and vector retrieval
+- **LocalAI bridge** — delegate a heavy task to a LocalAI server on your network
+- **Bilingual** — English and Bahasa Indonesia
+- **Minimalist Organic theme** — sage, terracotta, dusty blue, wheat
 
 ## Architecture
 
 ```
-Aria (Android App)
-├── On-Device (Primary)
-│   ├── Qwen 3.5 4B (llama.cpp JNI)
-│   ├── Agentic Engine
-│   ├── Memory + RAG
-│   └── Phone Automation
-├── LocalAI Server (Optional Bridge)
-│   ├── Heavy models (70B+, vision, TTS)
-│   └── Multi-modal tasks
-└── Cloud (Optional)
-    └── API key (user-provided)
+Aria (Android app)
+├── On-device (primary)
+│   ├── llama.cpp JNI engine
+│   ├── agentic engine: plan → act → observe
+│   ├── memory + RAG
+│   └── phone & smart-home tools
+├── LocalAI server (optional bridge)
+│   └── heavier models the phone cannot host
+└── Cloud providers (optional)
+    └── only with a key the user supplies
 ```
 
-## Building
+## Documentation
 
-### Prerequisites
+- [User guide](docs/user-guide.md) — what each setting does
+- [Cookbook](docs/cookbook.md) — per-node reference and recipes
+- [FAQ](docs/faq.md)
+- [External automation](docs/external-automation.md) — letting Tasker or an
+  `adb` script trigger a pipeline
+- [Architecture decisions](docs/decisions/README.md)
 
-- Android Studio Hedgehog or newer
-- JDK 17
-- Android SDK 34+
-- NDK 27+
+## Pre-release notice
 
-### Build Commands
-
-```bash
-# Debug build
-./gradlew assembleFossDebug
-
-# Release build
-./gradlew assembleFossRelease
-
-# Run tests
-./gradlew test
-```
-
-## Models
-
-| Model | Size | RAM | Best For |
-|-------|------|-----|----------|
-| Qwen 3.5 0.8B | 530 MB | 4 GB | Quick tasks |
-| Qwen 3.5 4B | 2.5 GB | 8 GB | Best balance |
-| Gemma 3 1B | 800 MB | 4 GB | Low RAM |
+Aria is under active development and is not yet ready for everyday reliance.
+Two parts in particular are stubs rather than finished features: the native
+llama.cpp sources are not vendored yet, so no model can actually be loaded, and
+the home screen holds the conversation in composition state instead of the agent
+orchestrator that will own it. The pipeline engine, tool system, memory, RAG and
+MCP integration behind them are inherited from the upstream project and do work.
+Treat a build as something to try, not something to depend on.
 
 ## License
 
-MIT
+Apache License 2.0 — see [LICENSE](LICENSE).

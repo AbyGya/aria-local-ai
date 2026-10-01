@@ -12,6 +12,9 @@ Only Kotlin files appear inside the generated blocks.
 
 <!-- AUTO-GEN:FILE_MAP -->
 - `App.kt` - Main Android Application class.
+- `bridge/` - Optional off-device backends the agent may delegate a heavy task to.
+  - `localai/` - Client for a self-hosted LocalAI server on the local network.
+    - `LocalAIBridge.kt` - Aria's optional bridge to a LocalAI server on the local network.
 - `data/` - Data layer encompassing local, remote, and repository implementations.
   - `audio/` - Voice-input capture.
     - `AudioRecorderImpl.kt` - `AudioRecorder` backed by platform `AudioRecord`: captures 16 kHz mono 16-bit PCM into a WAV inside `AudioCaptureStore`, ticks elapsed seconds into `RecordingState`, and auto-stops at the limit. Mic opened only after the composer permission gate (`@SuppressLint("MissingPermission")`). Excluded from Kover (Android-bound).
@@ -23,6 +26,7 @@ Only Kotlin files appear inside the generated blocks.
     - `KoogModelMapper.kt` - Maps string identifiers to Koog LLModel constants.
     - `KoogStructuredInferenceClientFactory.kt` - Data-layer impl of `domain/engine/structured/CloudStructuredInferenceClientFactory`; builds a retry-wrapped Koog client, detects native JSON via `LLModel.capabilities`, and exposes a `StructuredInferenceClient` that collapses the streamed response for the gate.
     - `LiteRTLlmEngine.kt` - LiteRT LLM engine implementation.
+    - `LlamaCppEngine.kt` - On-device inference engine backed by llama.cpp over JNI.
     - `MediaPipeTextEmbeddingEngine.kt` - MediaPipe text embedding engine.
     - `ModelNetworkGate.kt` - The one place that decides whether a model request may leave the device right now.
     - `OpenClAccelerationProbe.kt` - `HardwareAccelerationProbe` impl: decides whether GPU inference is plausible by linking `libOpenCL.so` (falling back to the conventional vendor paths) — never touches the native inference stack, so it cannot abort the process the way a real GPU init can. Memoised; both seams (linker, filesystem) injectable for JVM tests.
@@ -203,10 +207,12 @@ Only Kotlin files appear inside the generated blocks.
     - `AppFunctionsE2ETestEntryPoint.kt` - Hilt `EntryPoint` exposing `ToolRepository`, `SettingsRepository`, and `ChatRepository` to `AppFunctionsEndToEndTest` so the test can reach the production singletons without a Hilt test component.
   - `tools/` - Tool and action implementations.
     - `local/` - Local tools implementations.
+      - `AlarmTool.kt` - Alarm tool: creates an alarm or opens the clock app's alarm list.
       - `AppFunctionDataCodec.kt` - Bidirectional codec between LLM-emitted JSON argument strings and the typed `AppFunctionData` consumed by `AppFunctionManager.executeAppFunction`, plus a flat-JSON projection of `ExecuteAppFunctionResponse` for the agent's observation log.
       - `appfunctions/` - Callee side of AppFunctions: the one entry point publishing curated agent built-ins to other apps (Android 16+), and the injectable bodies its functions delegate to. The compiler generates `KnotworkAppFunctionService` here.
         - `AgentAppFunctionService.kt` - `@AppFunctionServiceEntryPoint` (Hilt `@AndroidEntryPoint`, API 36): declares every published `@AppFunction` — today `search` — as a one-line delegation; KSP generates `KnotworkAppFunctionService` + the `knotwork_app_functions.xml` asset, registered in the manifest.
         - `SearchAppFunction.kt` - Body of the published `search` AppFunction: argument checks (blank query, `lang` fallback/edition) and the call into `SearchTool.executeSearch`, the same path the agent uses; injected into `AgentAppFunctionService`.
+      - `CallTool.kt` - Call tool: places a call and reads recent call history.
       - `DelegateTaskTool.kt` - Task delegation tool.
       - `executors/` - `LocalToolExecutor` implementations registered via Hilt multibinding.
         - `AppendFileExecutor.kt` - `LocalToolExecutor` for the SENSITIVE `append_file` tool; adds UTF-8 content to the END of a workspace file via `AgentWorkspace.appendText` (creating it on first call, no overwrite flag), for accumulating entries in a log/report; maps every `WorkspaceError` to a readable observation.
@@ -222,8 +228,13 @@ Only Kotlin files appear inside the generated blocks.
         - `WorkspaceListingFormat.kt` - Shared, capped line-per-file rendering (path with control characters escaped + size + ISO-8601 UTC mtime) used by `list_files` and `find_files`.
         - `WorkspaceToolMessages.kt` - Observation text shared by the workspace file tools where the wording must not drift between them.
         - `WriteFileExecutor.kt` - `LocalToolExecutor` for the SENSITIVE `write_file` tool; writes UTF-8 content via `AgentWorkspace.writeText`, refusing an implicit overwrite (without `overwrite: true`) so existing content is never clobbered; maps every `WorkspaceError` to a readable observation.
+      - `FileTool.kt` - File tool: reads, writes, lists and deletes files, and reports storage.
       - `LocalAppFunctionManager.kt` - Manager for local app functions.
+      - `NotificationTool.kt` - Notification tool: reads the currently posted notifications.
       - `SearchTool.kt` - Local web search tool.
+      - `SmartHomeTool.kt` - Home Assistant REST access for the smart-home tools.
+      - `SmsTool.kt` - SMS tool: reads the inbox and sends a message.
+      - `SystemTool.kt` - System tool: launches apps, opens settings and URLs, sets alarms, and inspects or toggles Wi-Fi.
 - `di/` - Dependency Injection configurations (Hilt).
   - `ApplicationScope.kt` - `@Qualifier` for the application-lifetime `CoroutineScope` provided by `CoroutinesModule`.
   - `AppModule.kt` - General app-level DI module.
@@ -670,6 +681,7 @@ Only Kotlin files appear inside the generated blocks.
     - `ChatEntryRequestRelay.kt` - `@Singleton` one-shot bus carrying a `ChatEntryRequest` (`OpenThread{id}` / `NewChat`) from a `knotwork://chat…` / `new-chat` shortcut/share/notification to the single chat home, drained by the `CHAT_TAB` composable into `selectThread` / `createNewSessionWithPipeline`. `Channel.CONFLATED` so a cold-launch request buffers until the collector mounts and is consumed exactly once.
     - `TransientMessageRelay.kt` - `@Singleton` one-shot snackbar bus consumed by the activity-level `SnackbarHost` in `AppShellScaffold`. Used by `OnboardingViewModel.skipOnboarding` to surface the "install a model from Settings → Models" hint *after* navigation pops onboarding off the back-stack.
   - `theme/` - Compose theme definitions.
+    - `AriaTheme.kt` - Minimalist Organic theme for Aria, wired into the Knotwork design-system slots so every existing screen keeps working while the palette changes.
     - `KnotworkFontsBootstrap.kt` - Builds the bundled Inter / JetBrains Mono `FontFamily` instances from `R.font.*` and installs them into `:catalog`'s `KnotworkFonts`. Called once from `App.onCreate()` so the design-system typography renders against the brand fonts on the first frame.
     - `Theme.kt` - App theme definition. Reads the static fallback palette from `res/values/colors.xml` via `colorResource(...)`; dynamic color (Android 12+) takes precedence on supported devices.
     - `Type.kt` - Typography settings.
@@ -679,6 +691,8 @@ Only Kotlin files appear inside the generated blocks.
   - `ui/` - UI screens and ViewModels.
     - `about/` - About screen (full Knotwork redesign on top of `AboutContent`: hero brand mark + version / license / acknowledgments / privacy cards).
       - `AboutScreen.kt` - Slim wrapper around the catalog `AboutContent`. Owns the 20-entry hand-maintained acknowledgments list (`AboutAcknowledgments`) and the outbound License / Privacy URLs (`AboutLinks`) opened via `ACTION_VIEW`. Both objects are `internal` so their drift guards (`AboutAcknowledgmentsTest`, `AboutLinksTest` — the latter resolves the privacy link's anchor against the real `README.md` headings) can read them.
+    - `AriaHomeScreen.kt` - Aria's home surface: the conversation, its composer, and the empty state shown before the first message.
+    - `AriaMainActivity.kt` - Launcher activity for Aria.
     - `automation/` - External-automation request journal (Settings → Background & triggers → Request journal). Read-only by design: every control that could widen the entry point stays a Background settings row, so the app's most security-sensitive switch remains searchable and deep-linkable.
       - `ExternalAutomationJournalScreen.kt` - Slim mapper. Folds `ExternalAutomationJournalUiState` into the catalog `ExternalAutomationJournalViewState`: groups rows by device-local day through the shared `JournalDayGrouper`, ticks a coarse clock so relative timestamps advance while the screen is open, projects the domain status / rejection-reason dictionaries onto the catalog enums, and clips every caller-supplied string (request id, target, package) to a length this app chose rather than the caller. Builds the "how another app calls this" block from `ExternalAutomationContract` itself, so it cannot teach a call the parser would refuse.
       - `ExternalAutomationJournalUiState.kt` - Journal screen state: `contractEnabled`, `boundPipelineName` (resolved, so a deleted binding reads as unbound exactly as the authorizer treats it), and `entries` — nullable while the first read is in flight, because an unread journal is a skeleton and an empty one is a teaching state.

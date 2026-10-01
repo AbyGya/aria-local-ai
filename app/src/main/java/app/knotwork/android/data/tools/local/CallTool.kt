@@ -11,56 +11,56 @@ import javax.inject.Singleton
 
 private object CallToolError : AppError.System
 
+/**
+ * Call tool: places a call and reads recent call history.
+ *
+ * A call is dispatched through `ACTION_CALL`, which means the platform's own
+ * confirmation and the CALL_PHONE grant still apply — the tool does not dial
+ * around the user's consent. Like every tool that acts on the device it runs
+ * behind the agent's human-in-the-loop gate.
+ */
 @Singleton
-class CallTool @Inject constructor(
-    @ApplicationContext private val context: Context,
-) {
-    fun makeCall(phoneNumber: String): Result<String, AppError> {
-        return try {
-            val intent = Intent(Intent.ACTION_CALL).apply {
-                data = Uri.parse("tel:$phoneNumber")
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            context.startActivity(intent)
-            Result.Success("Calling $phoneNumber")
-        } catch (e: Exception) {
-            Result.Error(error = CallToolError, message = "Failed to make call: ${e.message}", throwable = e)
+class CallTool @Inject constructor(@ApplicationContext private val context: Context) {
+    fun makeCall(phoneNumber: String): Result<String, AppError> = try {
+        val intent = Intent(Intent.ACTION_CALL).apply {
+            data = Uri.parse("tel:$phoneNumber")
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
+        context.startActivity(intent)
+        Result.Success("Calling $phoneNumber")
+    } catch (e: Exception) {
+        Result.Error(error = CallToolError, message = "Failed to make call: ${e.message}", throwable = e)
     }
 
-    fun readCallLog(): Result<List<CallLogEntry>, AppError> {
-        return try {
-            val cursor = context.contentResolver.query(
-                android.provider.CallLog.Calls.CONTENT_URI,
-                null, null, null, "${android.provider.CallLog.Calls.DATE} DESC LIMIT 20"
-            )
-            val entries = mutableListOf<CallLogEntry>()
-            cursor?.use {
-                val numberIdx = it.getColumnIndex(android.provider.CallLog.Calls.NUMBER)
-                val typeIdx = it.getColumnIndex(android.provider.CallLog.Calls.TYPE)
-                val dateIdx = it.getColumnIndex(android.provider.CallLog.Calls.DATE)
-                val durationIdx = it.getColumnIndex(android.provider.CallLog.Calls.DURATION)
-                while (it.moveToNext()) {
-                    entries.add(
-                        CallLogEntry(
-                            number = if (numberIdx >= 0) it.getString(numberIdx) else "",
-                            type = if (typeIdx >= 0) it.getInt(typeIdx) else 0,
-                            date = if (dateIdx >= 0) it.getLong(dateIdx) else 0L,
-                            duration = if (durationIdx >= 0) it.getLong(durationIdx) else 0L,
-                        )
-                    )
-                }
+    fun readCallLog(): Result<List<CallLogEntry>, AppError> = try {
+        val cursor = context.contentResolver.query(
+            android.provider.CallLog.Calls.CONTENT_URI,
+            null,
+            null,
+            null,
+            "${android.provider.CallLog.Calls.DATE} DESC LIMIT 20",
+        )
+        val entries = mutableListOf<CallLogEntry>()
+        cursor?.use {
+            val numberIdx = it.getColumnIndex(android.provider.CallLog.Calls.NUMBER)
+            val typeIdx = it.getColumnIndex(android.provider.CallLog.Calls.TYPE)
+            val dateIdx = it.getColumnIndex(android.provider.CallLog.Calls.DATE)
+            val durationIdx = it.getColumnIndex(android.provider.CallLog.Calls.DURATION)
+            while (it.moveToNext()) {
+                entries.add(
+                    CallLogEntry(
+                        number = if (numberIdx >= 0) it.getString(numberIdx) else "",
+                        type = if (typeIdx >= 0) it.getInt(typeIdx) else 0,
+                        date = if (dateIdx >= 0) it.getLong(dateIdx) else 0L,
+                        duration = if (durationIdx >= 0) it.getLong(durationIdx) else 0L,
+                    ),
+                )
             }
-            Result.Success(entries)
-        } catch (e: Exception) {
-            Result.Error(error = CallToolError, message = "Failed to read call log: ${e.message}", throwable = e)
         }
+        Result.Success(entries)
+    } catch (e: Exception) {
+        Result.Error(error = CallToolError, message = "Failed to read call log: ${e.message}", throwable = e)
     }
 }
 
-data class CallLogEntry(
-    val number: String,
-    val type: Int,
-    val date: Long,
-    val duration: Long,
-)
+data class CallLogEntry(val number: String, val type: Int, val date: Long, val duration: Long)

@@ -7,6 +7,18 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 
+/**
+ * Aria's Minimalist Organic palette.
+ *
+ * Four natural families carry the whole product: sage green as the primary,
+ * terracotta for warmth, dusty blue for the cool counterweight, and wheat for
+ * highlights. Each family runs a full 50–900 ramp so a surface role can be
+ * picked at the right depth instead of reusing the primary hue.
+ *
+ * The node hues are hue-locked across light and dark on purpose — a pipeline
+ * reads as the same graph in either theme, so a node keeps its colour when the
+ * system flips.
+ */
 object AriaPalette {
     val Sage50 = Color(0xFFF4F7F2)
     val Sage100 = Color(0xFFE4EBE0)

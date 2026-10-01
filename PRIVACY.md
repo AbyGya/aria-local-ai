@@ -254,6 +254,42 @@ answer it produced.
 Where the file goes after the share sheet is decided by the app you pick, and
 that app's own policy applies from that point on.
 
+### 3.8 LocalAI bridge (opt-in, your own machine)
+
+`LocalAIBridge` forwards a prompt to a **LocalAI server you run yourself**, on
+your own network, and returns the reply. It exists so a task too heavy for a
+model that fits on the phone can still be handled without a cloud provider.
+
+The destination is entirely your choice: the app has no default host and no
+account, and the URL is whatever you enter in settings. What leaves the device
+along that request is the prompt text — which the model writes from your
+conversation — plus the model name, and nothing else: no device identifier, no
+credentials, no analytics. The usual caveat applies, that the request shows your
+IP address to whatever machine answers it. Because the target is a server you
+control rather than a provider above, this path has its own section rather than
+joining one of them.
+
+The bridge is inert until a server URL is configured, and every call it makes is
+recorded by the same privacy pill the cloud paths use, so "no network calls"
+stays true until you have actually used it.
+
+### 3.9 Smart-home control (opt-in, your own instance)
+
+`SmartHomeTool` talks to a **Home Assistant instance you run**, over its REST
+API, to list entities and to call a service — turning a light on, switching a
+switch. It is reached only through a tool call that stops for your approval
+before anything is sent.
+
+The request carries your Home Assistant long-lived access token in an
+`Authorization` header, together with the entity or service the model chose.
+That token is the sensitive part: it grants whatever your Home Assistant user
+can do, so it is never written to a log and never sent anywhere except the base
+URL you configured. As with the bridge above, the destination is yours, and the
+request shows your IP address to it; there is no cloud relay in between.
+
+Neither tool is reachable until you configure its destination, and both are
+counted by the privacy pill.
+
 ---
 
 ## 4. What never leaves your device
@@ -300,6 +336,18 @@ that app's own policy applies from that point on.
 | Foreground service, wake lock | Keeping a model download or a running pipeline alive while the screen is off | Used only while such work is running |
 | Run at boot | Re-arming your scheduled triggers after a restart, so an automation you set up does not silently stop | Declared by the scheduling library; used only if you created a trigger |
 | Execute app functions | Calling tool functions that other apps on the device expose | Declared, but Android grants it only to privileged system apps — on a normal install it is never granted and nothing uses it |
+| Send and read SMS | The SMS tool: sending a message you dictated, and reading recent conversations when the agent needs context | Asked on first use of the SMS tool |
+| Phone call, and call log | The call tool: placing a call you asked for, and reading recent history | Asked on first use of the call tool |
+| Contacts | Resolving a name the agent heard in conversation to a phone number | Asked on first use |
+| Alarm clock | The alarm tool, so an alarm the agent sets lands in your own clock app | Asked on first use |
+| Wi-Fi state, change Wi-Fi state | Reading the connected network's name and signal, and toggling Wi-Fi when asked | Asked on first use of the Wi-Fi tool |
+| All files access | The file tool, so a document, note or download you name can be read and written on the device | Asked on first use of the file tool |
+
+Each of these is asked for at the moment the tool that needs it first runs,
+rather than all at once on launch, so a grant is only requested once you have
+asked Aria to do the thing that requires it. Declaring a permission in the
+manifest installs nothing: Android grants nothing until the user agrees, and a
+refusal leaves the tool reporting why it cannot run.
 
 The Wi-Fi network name obtained under the location permission is used on the
 device to decide whether a trigger fires, and never leaves it. Background

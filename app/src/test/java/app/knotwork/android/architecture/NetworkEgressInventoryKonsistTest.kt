@@ -470,6 +470,12 @@ class NetworkEgressInventoryKonsistTest {
             "$MAIN/data/tools/local/executors/HttpRequestExecutor.kt" to
                 Egress.Opens("3.4", Indicator.RecordsItself),
 
+            // --- Self-hosted destinations the user configures (PRIVACY 3.8, 3.9) ---
+            "$MAIN/bridge/localai/LocalAIBridge.kt" to
+                Egress.Opens("3.8", Indicator.RecordsItself),
+            "$MAIN/data/tools/local/SmartHomeTool.kt" to
+                Egress.Opens("3.9", Indicator.RecordsItself),
+
             // --- Crash reporting, `full` flavour only (PRIVACY 3.5) -----------------
             CRASHLYTICS_PATH to
                 Egress.Opens("3.5", Indicator.NotShown(FIREBASE_NOT_SHOWN)),

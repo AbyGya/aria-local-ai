@@ -11,6 +11,13 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import app.knotwork.android.presentation.theme.AriaTheme
 
+/**
+ * Launcher activity for Aria.
+ *
+ * Installs the Minimalist Organic theme around the composable tree and hands
+ * off to [AriaApp]. Declared `singleTask` in the manifest so a launcher tap
+ * reuses this instance instead of stacking a second one.
+ */
 class AriaMainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -29,7 +36,7 @@ fun AriaApp() {
         AriaHomeScreen(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
+                .padding(innerPadding),
         )
     }
 }

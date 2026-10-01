@@ -85,7 +85,10 @@ class ExportedComponentInventoryTest {
             .filter { it.permission == null }
             .map { it.name.substringAfterLast('.') }
 
-        assertEquals(setOf("MainActivity", "ShareReceiverActivity", "ExternalAutomationReceiver"), unguarded.toSet())
+        assertEquals(
+            setOf("AriaMainActivity", "ShareReceiverActivity", "ExternalAutomationReceiver"),
+            unguarded.toSet(),
+        )
         unguarded.forEach { simpleName ->
             assertTrue("SECURITY.md does not name `$simpleName`", security.contains("`$simpleName`"))
         }
@@ -128,7 +131,7 @@ class ExportedComponentInventoryTest {
         val EXPECTED: Map<String, Set<Export>> = mapOf(
             "main" to setOf(
                 // Launcher: navigation only — a caller can open a chat by id, nothing runs.
-                Export(".presentation.ui.MainActivity", permission = null),
+                Export(".presentation.ui.AriaMainActivity", permission = null),
                 // Share target: must be startable on another app's behalf by the share sheet.
                 Export(".presentation.share.ShareReceiverActivity", permission = null),
                 Export(

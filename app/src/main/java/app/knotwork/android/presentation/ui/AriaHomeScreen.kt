@@ -19,16 +19,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Chat
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Mail
 import androidx.compose.material.icons.filled.MoreHoriz
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -53,13 +47,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import app.knotwork.android.R
 
+/**
+ * One entry in the conversation list.
+ *
+ * @property id position within the session, used as a stable list key.
+ * @property isUser which side of the conversation the entry belongs to; drives
+ *   bubble alignment and colours.
+ */
 data class ChatMessage(
     val id: Int,
     val text: String,
@@ -67,13 +67,21 @@ data class ChatMessage(
     val timestamp: Long = System.currentTimeMillis(),
 )
 
-data class ToolItem(
-    val name: String,
-    val icon: ImageVector,
-    val category: String,
-    val description: String,
-)
+/**
+ * A capability offered on the empty state, grouped by category in the tools
+ * screen.
+ */
+data class ToolItem(val name: String, val icon: ImageVector, val category: String, val description: String)
 
+/**
+ * Aria's home surface: the conversation, its composer, and the empty state
+ * shown before the first message.
+ *
+ * The session is held in local composition state rather than a ViewModel: this
+ * surface is a placeholder for the agent orchestrator, which will own the real
+ * transcript once it is wired in. Copy is localised through string resources so
+ * the Indonesian and English builds differ.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AriaHomeScreen(modifier: Modifier = Modifier) {
@@ -139,7 +147,7 @@ fun AriaHomeScreen(modifier: Modifier = Modifier) {
                                 id = messages.size,
                                 text = inputText.trim(),
                                 isUser = true,
-                            )
+                            ),
                         )
                         inputText = ""
                     }
