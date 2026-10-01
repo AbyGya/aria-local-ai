@@ -10,10 +10,6 @@ import app.knotwork.design.a11y.LocalKnotworkA11y
 import app.knotwork.design.tokens.AriaDark
 import app.knotwork.design.tokens.AriaLight
 import app.knotwork.design.tokens.AriaPalette
-import app.knotwork.design.tokens.DefaultKnotworkElevation
-import app.knotwork.design.tokens.DefaultKnotworkMotion
-import app.knotwork.design.tokens.DefaultKnotworkShapes
-import app.knotwork.design.tokens.DefaultKnotworkSpacing
 import app.knotwork.design.tokens.KnotworkElevation
 import app.knotwork.design.tokens.KnotworkExtendedColors
 import app.knotwork.design.tokens.KnotworkMotion
@@ -39,10 +35,10 @@ fun AriaTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable (
     val extended = if (darkTheme) ariaExtendedColorsDark() else ariaExtendedColorsLight()
     CompositionLocalProvider(
         LocalKnotworkExtendedColors provides extended,
-        LocalKnotworkSpacing provides DefaultKnotworkSpacing,
-        LocalKnotworkShapes provides DefaultKnotworkShapes,
-        LocalKnotworkElevation provides DefaultKnotworkElevation,
-        LocalKnotworkMotion provides DefaultKnotworkMotion,
+        LocalKnotworkSpacing provides KnotworkSpacing(),
+        LocalKnotworkShapes provides KnotworkShapes(),
+        LocalKnotworkElevation provides KnotworkElevation(),
+        LocalKnotworkMotion provides KnotworkMotion(),
     ) {
         MaterialTheme(
             colorScheme = colorScheme,
