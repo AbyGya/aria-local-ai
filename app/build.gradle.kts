@@ -2037,9 +2037,6 @@ dependencies {
     // LiteRT LLM Inference
     implementation(libs.litertlm)
 
-    // llama.cpp JNI (Aria primary backend)
-    implementation("com.github.ggerganov:llama.cpp:master")
-
     // MediaPipe Tasks Text.
     //
     // It drags `com.google.android.datatransport` in for its own logging, which
