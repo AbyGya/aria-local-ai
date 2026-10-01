@@ -1,110 +1,44 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Aria</string>
-    <string name="app_tagline">Your Local AI Assistant</string>
 
-    <!-- Navigation -->
-    <string name="nav_chat">Chat</string>
-    <string name="nav_tools">Tools</string>
-    <string name="nav_memory">Memory</string>
-    <string name="nav_settings">Settings</string>
+    <!-- Approval notification (Human-in-the-loop fallback when chat is not visible) -->
+    <string name="approval_channel_sensitive_name">Agent Approvals</string>
+    <string name="approval_channel_sensitive_description">Confirmations for sensitive tool executions.</string>
+    <string name="approval_channel_destructive_name">Agent Approvals — Destructive</string>
+    <string name="approval_channel_destructive_description">Confirmations for irreversible tool executions (e.g. send, delete, purchase).</string>
+    <string name="approval_notification_title_sensitive">Tool execution approval</string>
+    <string name="approval_notification_title_destructive">Destructive action requires approval</string>
+    <string name="approval_notification_text">Agent wants to use %1$s. Allow?</string>
+    <string name="approval_notification_big_text">Agent wants to use %1$s with args:\n%2$s</string>
+    <string name="approval_notification_waiting_text">Waiting for your approval to use %1$s.</string>
+    <string name="approval_notification_review_in_chat">Review in chat</string>
+    <string name="approval_notification_arguments_cut">The arguments are longer than this notification can show. Open the chat to read them all before approving.</string>
 
-    <!-- Chat -->
-    <string name="chat_input_hint">Ask Aria anything…</string>
-    <string name="chat_send">Send</string>
-    <string name="chat_clear">Clear conversation</string>
-    <string name="chat_new">New conversation</string>
-    <string name="chat_thinking">Aria is thinking…</string>
-    <string name="chat_waiting_approval">Waiting for your approval…</string>
-    <string name="chat_approved">Approved</string>
-    <string name="chat_denied">Denied</string>
+    <!-- Clarification notification (background waiting for the user's answer) -->
+    <string name="clarification_channel_name">Agent Questions</string>
+    <string name="clarification_channel_description">Questions the agent needs answered to continue a paused task.</string>
+    <string name="clarification_notification_title">Agent needs your input</string>
 
-    <!-- Tools -->
-    <string name="tools_title">Tools</string>
-    <string name="tools_phone">Phone</string>
-    <string name="tools_file">Files</string>
-    <string name="tools_system">System</string>
-    <string name="tools_home">Smart Home</string>
-    <string name="tools_bridge">LocalAI Bridge</string>
-
-    <!-- Phone Tools -->
-    <string name="tool_sms">Send SMS</string>
-    <string name="tool_call">Make Call</string>
-    <string name="tool_notification">Notifications</string>
-    <string name="tool_alarm">Set Alarm</string>
-
-    <!-- File Tools -->
-    <string name="tool_read_file">Read File</string>
-    <string name="tool_write_file">Write File</string>
-    <string name="tool_list_files">List Files</string>
-    <string name="tool_delete_file">Delete File</string>
-
-    <!-- System Tools -->
-    <string name="tool_open_app">Open App</string>
-    <string name="tool_open_settings">Open Settings</string>
-    <string name="tool_open_url">Open URL</string>
-    <string name="tool_wifi">WiFi Control</string>
-
-    <!-- Memory -->
-    <string name="memory_title">Memory</string>
-    <string name="memory_search">Search memories…</string>
-    <string name="memory_add">Add memory</string>
-    <string name="memory_delete">Delete memory</string>
-    <string name="memory_empty">No memories yet</string>
-
-    <!-- Settings -->
-    <string name="settings_title">Settings</string>
-    <string name="settings_model">Model</string>
-    <string name="settings_language">Language</string>
-    <string name="settings_theme">Theme</string>
-    <string name="settings_backend">Backend</string>
-    <string name="settings_localai_url">LocalAI Server URL</string>
-
-    <!-- Model -->
-    <string name="model_download">Download Model</string>
-    <string name="model_downloading">Downloading…</string>
-    <string name="model_ready">Model ready</string>
-    <string name="model_not_loaded">No model loaded</string>
-    <string name="model_recommended">Recommended for your device</string>
-
-    <!-- Backend -->
-    <string name="backend_cpu">CPU</string>
-    <string name="backend_gpu">GPU (Vulkan)</string>
-    <string name="backend_localai">LocalAI Server</string>
-
-    <!-- Language -->
-    <string name="lang_english">English</string>
-    <string name="lang_indonesian">Bahasa Indonesia</string>
-    <string name="lang_auto">Auto-detect</string>
-
-    <!-- Theme -->
-    <string name="theme_light">Light</string>
-    <string name="theme_dark">Dark</string>
-    <string name="theme_system">System</string>
-
-    <!-- Common -->
-    <string name="save">Save</string>
-    <string name="cancel">Cancel</string>
-    <string name="delete">Delete</string>
-    <string name="edit">Edit</string>
-    <string name="search">Search</string>
-    <string name="loading">Loading…</string>
-    <string name="error">Error</string>
-    <string name="retry">Retry</string>
-    <string name="ok">OK</string>
-    <string name="yes">Yes</string>
-    <string name="no">No</string>
-
-    <!-- Errors -->
-    <string name="error_model_not_found">Model file not found</string>
-    <string name="error_model_load_failed">Failed to load model</string>
-    <string name="error_network">Network error</string>
-    <string name="error_permission">Permission denied</string>
-    <string name="error_unknown">Unknown error</string>
-
-    <!-- Permissions -->
-    <string name="permission_sms">SMS permission required</string>
-    <string name="permission_call">Call permission required</string>
-    <string name="permission_notification">Notification access required</string>
-    <string name="permission_storage">Storage permission required</string>
+    <!-- Entry surfaces: launcher shortcuts, share target, Quick Settings tile -->
+    <string name="shortcut_new_chat_short">New chat</string>
+    <string name="shortcut_new_chat_long">Start a new chat</string>
+    <string name="shortcut_pipelines_short">Pipelines</string>
+    <string name="shortcut_pipelines_long">Open pipeline library</string>
+    <string name="share_not_configured">Pick a pipeline for sharing in Settings → Background.</string>
+    <string name="share_nothing_to_share">Nothing to share.</string>
+    <string name="share_rate_limited">Too many shares in the last hour. Try again later.</string>
+    <!-- A toast holds two lines on Android 12+, so these are shorter than the chat's
+         wording for the same three pre-flight refusals (ImageAttachmentBlockCopy). -->
+    <string name="share_image_blocked_cloud">The share pipeline starts in the cloud, and images stay on your device.</string>
+    <string name="share_image_blocked_model_no_vision">This model can\'t read images. Turn on image support in Models.</string>
+    <string name="share_image_blocked_no_vision_step">The share pipeline has no on-device step that can read images.</string>
+    <string name="share_session_image_name">Shared image</string>
+    <string name="share_session_content_name">Shared content</string>
+    <string name="share_session_reused_name">Shared</string>
+    <string name="tile_label">Run pipeline</string>
+    <string name="tile_duty_prompt">Run my duty pipeline.</string>
+    <string name="tile_running">Running pipeline in the background…</string>
+    <string name="tile_not_configured">Pick a Quick Settings pipeline in Settings → Background.</string>
+    <string name="tile_subtitle_ready">Ready</string>
+    <string name="tile_subtitle_unconfigured">Not set up</string>
 </resources>

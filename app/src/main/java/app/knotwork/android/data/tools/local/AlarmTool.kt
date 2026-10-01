@@ -3,15 +3,19 @@ package app.knotwork.android.data.tools.local
 import android.content.Context
 import android.content.Intent
 import android.provider.AlarmClock
+import app.knotwork.android.domain.models.AppError
+import app.knotwork.android.domain.models.Result
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+
+private object AlarmToolError : AppError.System
 
 @Singleton
 class AlarmTool @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
-    fun setAlarm(hour: Int, minute: Int, message: String): Result<String, String> {
+    fun setAlarm(hour: Int, minute: Int, message: String): Result<String, AppError> {
         return try {
             val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
                 putExtra(AlarmClock.EXTRA_HOUR, hour)
@@ -23,11 +27,11 @@ class AlarmTool @Inject constructor(
             context.startActivity(intent)
             Result.Success("Alarm set for ${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}")
         } catch (e: Exception) {
-            Result.Error("Failed to set alarm: ${e.message}")
+            Result.Error(error = AlarmToolError, message = "Failed to set alarm: ${e.message}", throwable = e)
         }
     }
 
-    fun showAlarms(): Result<String, String> {
+    fun showAlarms(): Result<String, AppError> {
         return try {
             val intent = Intent(AlarmClock.ACTION_SHOW_ALARMS).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -35,7 +39,7 @@ class AlarmTool @Inject constructor(
             context.startActivity(intent)
             Result.Success("Showing alarms")
         } catch (e: Exception) {
-            Result.Error("Failed to show alarms: ${e.message}")
+            Result.Error(error = AlarmToolError, message = "Failed to show alarms: ${e.message}", throwable = e)
         }
     }
 }

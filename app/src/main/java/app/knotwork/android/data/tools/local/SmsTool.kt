@@ -2,15 +2,19 @@ package app.knotwork.android.data.tools.local
 
 import android.content.Context
 import android.telephony.SmsManager
+import app.knotwork.android.domain.models.AppError
+import app.knotwork.android.domain.models.Result
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+
+private object SmsToolError : AppError.System
 
 @Singleton
 class SmsTool @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
-    fun sendSms(phoneNumber: String, message: String): Result<String, String> {
+    fun sendSms(phoneNumber: String, message: String): Result<String, AppError> {
         return try {
             val smsManager = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
                 context.getSystemService(SmsManager::class.java)
@@ -21,11 +25,11 @@ class SmsTool @Inject constructor(
             smsManager.sendTextMessage(phoneNumber, null, message, null, null)
             Result.Success("SMS sent to $phoneNumber")
         } catch (e: Exception) {
-            Result.Error("Failed to send SMS: ${e.message}")
+            Result.Error(error = SmsToolError, message = "Failed to send SMS: ${e.message}", throwable = e)
         }
     }
 
-    fun readSms(): Result<List<SmsMessage>, String> {
+    fun readSms(): Result<List<SmsMessage>, AppError> {
         return try {
             val cursor = context.contentResolver.query(
                 android.net.Uri.parse("content://sms/inbox"),
@@ -48,7 +52,7 @@ class SmsTool @Inject constructor(
             }
             Result.Success(messages)
         } catch (e: Exception) {
-            Result.Error("Failed to read SMS: ${e.message}")
+            Result.Error(error = SmsToolError, message = "Failed to read SMS: ${e.message}", throwable = e)
         }
     }
 }

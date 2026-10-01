@@ -3,15 +3,19 @@ package app.knotwork.android.data.tools.local
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import app.knotwork.android.domain.models.AppError
+import app.knotwork.android.domain.models.Result
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+
+private object CallToolError : AppError.System
 
 @Singleton
 class CallTool @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
-    fun makeCall(phoneNumber: String): Result<String, String> {
+    fun makeCall(phoneNumber: String): Result<String, AppError> {
         return try {
             val intent = Intent(Intent.ACTION_CALL).apply {
                 data = Uri.parse("tel:$phoneNumber")
@@ -20,11 +24,11 @@ class CallTool @Inject constructor(
             context.startActivity(intent)
             Result.Success("Calling $phoneNumber")
         } catch (e: Exception) {
-            Result.Error("Failed to make call: ${e.message}")
+            Result.Error(error = CallToolError, message = "Failed to make call: ${e.message}", throwable = e)
         }
     }
 
-    fun readCallLog(): Result<List<CallLogEntry>, String> {
+    fun readCallLog(): Result<List<CallLogEntry>, AppError> {
         return try {
             val cursor = context.contentResolver.query(
                 android.provider.CallLog.Calls.CONTENT_URI,
@@ -49,7 +53,7 @@ class CallTool @Inject constructor(
             }
             Result.Success(entries)
         } catch (e: Exception) {
-            Result.Error("Failed to read call log: ${e.message}")
+            Result.Error(error = CallToolError, message = "Failed to read call log: ${e.message}", throwable = e)
         }
     }
 }

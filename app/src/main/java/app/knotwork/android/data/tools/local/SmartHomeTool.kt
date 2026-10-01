@@ -1,10 +1,14 @@
 package app.knotwork.android.data.tools.local
 
-import dagger.hilt.android.scopes.ServiceScoped
+import app.knotwork.android.domain.models.AppError
+import app.knotwork.android.domain.models.Result
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -13,6 +17,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
+
+private object SmartHomeError : AppError.Network
 
 @Singleton
 class SmartHomeTool @Inject constructor() {
@@ -23,7 +29,7 @@ class SmartHomeTool @Inject constructor() {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    suspend fun getEntities(baseUrl: String, token: String): Result<List<HomeEntity>, String> = withContext(Dispatchers.IO) {
+    suspend fun getEntities(baseUrl: String, token: String): Result<List<HomeEntity>, AppError> = withContext(Dispatchers.IO) {
         try {
             val request = Request.Builder()
                 .url("$baseUrl/api/states")
@@ -31,8 +37,11 @@ class SmartHomeTool @Inject constructor() {
                 .get()
                 .build()
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext Result.Error("HTTP ${response.code}")
-                val body = response.body?.string() ?: return@withContext Result.Error("Empty response")
+                if (!response.isSuccessful) {
+                    return@withContext Result.Error(error = SmartHomeError, message = "HTTP ${response.code}")
+                }
+                val body = response.body?.string()
+                    ?: return@withContext Result.Error(error = SmartHomeError, message = "Empty response")
                 val entities = json.parseToJsonElement(body).jsonArray.map { element ->
                     val obj = element.jsonObject
                     HomeEntity(
@@ -44,14 +53,20 @@ class SmartHomeTool @Inject constructor() {
                 Result.Success(entities)
             }
         } catch (e: Exception) {
-            Result.Error("Failed to get entities: ${e.message}")
+            Result.Error(error = SmartHomeError, message = "Failed to get entities: ${e.message}", throwable = e)
         }
     }
 
-    suspend fun callService(baseUrl: String, token: String, domain: String, service: String, entityId: String): Result<String, String> = withContext(Dispatchers.IO) {
+    suspend fun callService(
+        baseUrl: String,
+        token: String,
+        domain: String,
+        service: String,
+        entityId: String,
+    ): Result<String, AppError> = withContext(Dispatchers.IO) {
         try {
             val requestBody = JsonObject(buildMap {
-                put("entity_id", kotlinx.serialization.json.JsonPrimitive(entityId))
+                put("entity_id", JsonPrimitive(entityId))
             }).toString().toRequestBody("application/json".toMediaType())
 
             val request = Request.Builder()
@@ -60,11 +75,13 @@ class SmartHomeTool @Inject constructor() {
                 .post(requestBody)
                 .build()
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return@withContext Result.Error("HTTP ${response.code}")
+                if (!response.isSuccessful) {
+                    return@withContext Result.Error(error = SmartHomeError, message = "HTTP ${response.code}")
+                }
                 Result.Success("Service called: $domain.$service on $entityId")
             }
         } catch (e: Exception) {
-            Result.Error("Failed to call service: ${e.message}")
+            Result.Error(error = SmartHomeError, message = "Failed to call service: ${e.message}", throwable = e)
         }
     }
 }

@@ -18,6 +18,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
@@ -65,7 +66,13 @@ class LlamaCppEngine @Inject constructor(
 
     init {
         context.registerComponentCallbacks(this)
-        System.loadLibrary("llama_jni")
+        // The native library is packaged once the real llama.cpp JNI lands.
+        // Until then, loading is best-effort so class init never crashes.
+        try {
+            System.loadLibrary("llama_jni")
+        } catch (t: Throwable) {
+            Timber.w(t, "llama_jni not packaged yet; native calls will fail until the JNI lands")
+        }
     }
 
     private object LlmSystemError : AppError.System

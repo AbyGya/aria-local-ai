@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Aria home screen -->
+    <string name="chat_input_hint">Ask Aria anything…</string>
+    <string name="chat_send">Send</string>
+    <string name="chat_clear">Clear conversation</string>
+    <string name="chat_new">New conversation</string>
+    <string name="chat_thinking">Aria is thinking…</string>
+    <string name="chat_waiting_approval">Waiting for your approval…</string>
+
+    <!-- Aria tools -->
+    <string name="tools_title">Tools</string>
+    <string name="tool_sms">Send SMS</string>
+    <string name="tool_call">Make Call</string>
+    <string name="tool_notification">Notifications</string>
+    <string name="tool_alarm">Set Alarm</string>
+    <string name="tool_read_file">Read File</string>
+    <string name="tool_write_file">Write File</string>
+    <string name="tool_list_files">List Files</string>
+    <string name="tool_delete_file">Delete File</string>
+    <string name="tool_open_app">Open App</string>
+    <string name="tool_open_settings">Open Settings</string>
+    <string name="tool_open_url">Open URL</string>
+    <string name="tool_wifi">WiFi Control</string>
+
+    <!-- Aria memory -->
+    <string name="memory_title">Memory</string>
+    <string name="memory_search">Search memories…</string>
+    <string name="memory_add">Add memory</string>
+    <string name="memory_empty">No memories yet</string>
+
+    <!-- Aria model/backend -->
+    <string name="model_recommended">Recommended for your device</string>
+    <string name="backend_localai">LocalAI Server</string>
+    <string name="settings_localai_url">LocalAI Server URL</string>
+</resources>

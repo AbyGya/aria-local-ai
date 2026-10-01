@@ -196,13 +196,6 @@ android {
     // without it.
     ndkVersion = libs.versions.ndk.get()
 
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
-    }
-
     defaultConfig {
         applicationId = "app.knotwork.android"
         minSdk = 34
