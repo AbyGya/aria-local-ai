@@ -149,11 +149,11 @@
             (and the older, recreated one was sometimes a blank frame).
         -->
         <activity
-            android:name=".presentation.ui.AriaMainActivity"
+            android:name=".presentation.ui.MainActivity"
             android:exported="true"
             android:label="@string/app_name"
             android:launchMode="singleTask"
-            android:theme="@style/Theme.Aria">
+            android:theme="@style/Theme.App.Splash">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 

@@ -3,8 +3,6 @@
 
     <style name="Theme.Knotwork" parent="android:Theme.Material.Light.NoActionBar" />
 
-    <style name="Theme.Aria" parent="android:Theme.Material.Light.NoActionBar" />
-
     <!--
         Platform splash theme (Android 12+ splash screen API).
 

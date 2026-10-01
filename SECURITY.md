@@ -305,7 +305,7 @@ new risk surface, and the design constrains it deliberately:
   chats, triggers and calling pipelines that still name that id are listed, and
   importing as a copy — the default — leaves them alone.
 - **What another app can reach without asking.** Three components are exported
-  without a permission. The launcher activity (`AriaMainActivity`) only
+  without a permission. The launcher activity (`MainActivity`) only
   navigates: a
   caller can open a chat by its id, and nothing runs. The other two take content
   from any app on the device, and from `adb`: the share target

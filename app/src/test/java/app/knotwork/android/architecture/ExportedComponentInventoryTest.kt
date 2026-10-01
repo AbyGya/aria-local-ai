@@ -86,7 +86,7 @@ class ExportedComponentInventoryTest {
             .map { it.name.substringAfterLast('.') }
 
         assertEquals(
-            setOf("AriaMainActivity", "ShareReceiverActivity", "ExternalAutomationReceiver"),
+            setOf("MainActivity", "ShareReceiverActivity", "ExternalAutomationReceiver"),
             unguarded.toSet(),
         )
         unguarded.forEach { simpleName ->
@@ -131,7 +131,7 @@ class ExportedComponentInventoryTest {
         val EXPECTED: Map<String, Set<Export>> = mapOf(
             "main" to setOf(
                 // Launcher: navigation only — a caller can open a chat by id, nothing runs.
-                Export(".presentation.ui.AriaMainActivity", permission = null),
+                Export(".presentation.ui.MainActivity", permission = null),
                 // Share target: must be startable on another app's behalf by the share sheet.
                 Export(".presentation.share.ShareReceiverActivity", permission = null),
                 Export(

@@ -45,7 +45,7 @@ uses-permission app.knotwork.android.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
 
 # ── Exported by the app — reachable by any installed app when permission=none ─
 exported activity app.knotwork.android.presentation.share.ShareReceiverActivity permission=none
-exported activity app.knotwork.android.presentation.ui.AriaMainActivity permission=none
+exported activity app.knotwork.android.presentation.ui.MainActivity permission=none
 exported receiver app.knotwork.android.presentation.receivers.ExternalAutomationReceiver permission=none
 exported service app.knotwork.android.data.tools.local.appfunctions.KnotworkAppFunctionService permission=android.permission.BIND_APP_FUNCTION_SERVICE
 exported service app.knotwork.android.presentation.tile.DutyPipelineTileService permission=android.permission.BIND_QUICK_SETTINGS_TILE
