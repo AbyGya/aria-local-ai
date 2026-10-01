@@ -25,6 +25,11 @@ jobs:
     name: Assemble APK
     runs-on: ubuntu-latest
     timeout-minutes: 75
+    # The publish step creates a release with the default token, which a
+    # workflow gets read-only unless it asks. Scoped to `contents` alone so
+    # the rest of the token's write surface stays closed.
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

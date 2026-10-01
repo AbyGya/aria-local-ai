@@ -1,5 +1,7 @@
 # Aria — Local AI Assistant for Android
 
+![Version](https://img.shields.io/badge/version-0.11.0-orange.svg)
+
 Aria is a privacy-first, on-device AI assistant for Android. It can plan, learn,
 and act on the phone — inference runs locally, and nothing leaves the device
 unless the user points Aria at a server themselves.
@@ -74,13 +76,14 @@ Aria (Android app)
 
 ## Pre-release notice
 
-Aria is under active development and is not yet ready for everyday reliance.
-Two parts in particular are stubs rather than finished features: the native
-llama.cpp sources are not vendored yet, so no model can actually be loaded, and
-the home screen holds the conversation in composition state instead of the agent
-orchestrator that will own it. The pipeline engine, tool system, memory, RAG and
-MCP integration behind them are inherited from the upstream project and do work.
-Treat a build as something to try, not something to depend on.
+This project is currently at **version 0.11.0** and is under active development
+— not yet ready for everyday reliance.
+One part in particular is a stub rather than a finished feature: the native
+llama.cpp sources are not vendored yet, so no model can actually be loaded and
+the on-device engine reports that instead of replying. The pipeline engine, tool
+system, memory, RAG and MCP integration behind it are inherited from the
+upstream project and do work. Treat a build as something to try, not something
+to depend on.
 
 ## License
 
