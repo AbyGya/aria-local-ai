@@ -70,11 +70,20 @@ jobs:
 
       - name: Publish draft release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@72f46a35477d634ce4b98491a78f9b10a0f5155e # v2.2.1
-        with:
-          files: app/build/outputs/apk/foss/release/*.apk
-          tag_name: v${{ github.run_number }}
-          name: Aria v${{ github.run_number }}
-          draft: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: v${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(app/build/outputs/apk/foss/release/*.apk)
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "No release APK produced; skipping release." >&2
+            exit 0
+          fi
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --title "Aria ${RELEASE_TAG}" --draft
+          fi
